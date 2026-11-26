@@ -663,21 +663,34 @@ class SystemExecutor:
         try:
             # Attach log capture before the bot starts producing output.
             self.set_capture(bot, True)
-            # The shim is blocked opening the FIFO for reading; writing
-            # the launch configuration unblocks it and it execs into the
-            # bot. The write waits for the reader with a bound, so a pane
-            # that died before the shim started cannot hang the helper.
+            # Capture the pane's identity BEFORE unblocking the shim.
+            # The shim is blocked opening the FIFO, so its process
+            # cannot exit yet; and because it execs into the bot (same
+            # pid, same start time), the identity read now names the
+            # bot itself. Reading it after the FIFO write instead raced
+            # with bots that exit the instant they start: by the time
+            # the helper looked, tmux had already reaped the pane
+            # process and the start failed as "vanished".
+            identity: ProcessIdentity | None = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                pid = self._pane_pid(bot)
+                if pid is not None:
+                    identity = procident.read_identity(pid)
+                    if identity is not None:
+                        break
+                time.sleep(0.05)
+            if identity is None:
+                raise RuntimeError("pane process vanished during start")
+            # Writing the launch configuration unblocks the shim and
+            # it execs into the bot. The write waits for the reader
+            # with a bound, so a pane that died before the shim
+            # started cannot hang the helper.
             payload = json.dumps(launch).encode()
             try:
                 _write_fifo(fifo, payload, timeout=10.0)
             except (OSError, RuntimeError) as exc:
                 raise RuntimeError(f"writing launch FIFO failed: {exc}") from exc
-            pid = self._pane_pid(bot)
-            if pid is None:
-                raise RuntimeError("could not determine pane pid")
-            identity = procident.read_identity(pid)
-            if identity is None:
-                raise RuntimeError("pane process vanished during start")
             return identity
         except Exception:
             # Any failure after the session exists must not leak the
