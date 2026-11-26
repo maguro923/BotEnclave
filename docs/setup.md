@@ -1,116 +1,108 @@
 # Setup guide
 
 This guide takes a fresh Linux host from nothing to a running
-BotEnclave instance with its first bot online. It consolidates the
-install paths that the README only sketches; for the design behind
-them see [architecture.md](architecture.md), and for day-2 operations
-see [backup.md](backup.md) and [upgrading.md](upgrading.md).
+BotEnclave instance with its first bot online. For the design behind
+the layout see [architecture.md](architecture.md), and for day-2
+operations see [backup.md](backup.md) and [upgrading.md](upgrading.md).
 
-There are two supported layouts:
-
-| Layout | When to use it |
-|---|---|
-| **Quickstart** (single-host) | Trying BotEnclave out, a personal host you fully control. The manager runs as root and drives the helper in-process. |
-| **Production** (systemd) | Anything long-lived or shared. The manager runs as its own unprivileged user, the helper is reached through a narrow sudoers rule, and each bot runs in its own systemd unit. |
-
-Both layouts give every bot its own OS user, tmux server and process
-tree; they differ in how the manager itself is run.
+There is one supported layout, the **production layout**: the manager
+runs as its own unprivileged user under systemd, the helper is reached
+through a narrow sudoers rule, and each bot runs as its own OS user in
+its own tmux server (optionally in its own systemd unit). The
+installer script in §2 performs the whole setup; §3 lists the same
+steps manually.
 
 ## 1. Host prerequisites
 
 - Linux (or WSL2 with systemd enabled). Windows and macOS are not
   supported.
-- Python 3.11 or later.
-- `tmux` and `git` on `PATH`.
-- For the production layout: systemd and sudo.
+- systemd and sudo.
+- Python 3.11 or later, `tmux` and `git` on `PATH`.
 - About 200 MB of disk for the manager and its virtualenv, plus
   whatever your bots need (each bot gets its own virtualenv per
   release).
 
-On Debian/Ubuntu:
+On Debian/Ubuntu the installer script installs the packages for you:
 
 ```sh
 sudo apt update
 sudo apt install -y python3 python3-venv tmux git
 ```
 
-## 2. Install the package
+## 2. Automated setup (recommended)
 
-Install into a location that the per-bot OS users can read and
-execute — they load the launcher shim and the tmux configuration from
-the package directory, so a virtualenv under a private home directory
-will not work.
+Clone the repository and run the installer as root:
+
+```sh
+git clone https://github.com/maguro923/BotEnclave.git
+cd BotEnclave
+sudo sh scripts/install.sh
+```
+
+The script is idempotent (safe to re-run) and performs:
+
+1. the prerequisite check/install (§1),
+2. a virtualenv at `/usr/local/lib/botenclave/venv` with the package
+   installed into it — a location the per-bot OS users can read and
+   execute, because they load the launcher shim and the tmux
+   configuration from the package directory,
+3. the manager user `botenclave` and the data root `/srv/botenclave`
+   (the directory that holds the databases, secrets, audit log and
+   every bot's files — keep it off shared/network filesystems, the
+   state store is SQLite and expects local file locking),
+4. the helper entry point, the sudoers rule and the manager unit
+   (`botmgr systemd install`),
+5. enabling and starting the service, waiting for its health
+   endpoint, and printing the first-run setup token.
+
+Paths can be overridden through environment variables:
+`BOTENCLAVE_ROOT`, `BOTENCLAVE_MANAGER_USER`, `BOTENCLAVE_VENV`.
+
+Then continue with [first-run setup](#4-first-run-setup).
+
+## 3. Manual setup
+
+The same steps by hand:
 
 ```sh
 git clone https://github.com/maguro923/BotEnclave.git
 cd BotEnclave
 sudo python3 -m venv /usr/local/lib/botenclave/venv
 sudo /usr/local/lib/botenclave/venv/bin/pip install .
-```
 
-From here on, `botmgr` means
-`/usr/local/lib/botenclave/venv/bin/botmgr`.
-
-Choose a **data root** — the directory that will hold the databases,
-secrets, audit log and every bot's files. The examples use
-`/srv/botenclave`. Keep it off shared/network filesystems: the state
-store is SQLite and expects local file locking.
-
-## 3a. Quickstart layout
-
-Run the manager as root:
-
-```sh
-sudo botmgr --root /srv/botenclave serve --port 8000
-```
-
-Leave it in the foreground for a first look, or run it under tmux /
-`nohup` for a trial. Then continue with [first-run setup](#4-first-run-setup).
-
-Notes:
-
-- `--transport` defaults to `direct`, which is only safe because the
-  manager itself is root here. Never expose this mode's port beyond a
-  trusted network without TLS in front (see [§6](#6-tls-and-access)).
-- The manager is single-process by design and refuses to start twice
-  against the same root (it takes an exclusive lock). If a previous
-  process was killed uncleanly, make sure no `botmgr serve` is alive
-  before restarting.
-
-## 3b. Production layout (systemd)
-
-```sh
-# 1. the manager user and the data root
+# the manager user and the data root
 sudo useradd --system --home /srv/botenclave --shell /usr/sbin/nologin botenclave
 sudo mkdir -p /srv/botenclave && sudo chown botenclave /srv/botenclave
 
-# 2. helper entry point, sudoers rule and the manager unit
-sudo botmgr --root /srv/botenclave systemd install --manager-user botenclave
+# helper entry point, sudoers rule and the manager unit
+sudo /usr/local/lib/botenclave/venv/bin/botmgr --root /srv/botenclave \
+    systemd install --manager-user botenclave
 
-# 3. start the manager
+# start the manager
 sudo systemctl enable --now botenclave
 ```
 
-`botmgr systemd render-manager` / `render-bot` print the unit files
-for review without installing anything. Full details, including
-per-bot units and their resource limits, are in
-[systemd.md](systemd.md).
-
-In this layout the manager talks to the helper through sudo
-(`--transport sudo`, already set in the installed unit) and bots can
-later be moved under individual systemd units with
-`botmgr systemd install-bot <bot>` plus `--bot-runtime systemd`.
+From here on, `botmgr` means
+`/usr/local/lib/botenclave/venv/bin/botmgr`. In this layout the
+manager talks to the helper through sudo (`--transport sudo`, already
+set in the installed unit) and bots can later be moved under
+individual systemd units with `botmgr systemd install-bot <bot>` plus
+`--bot-runtime systemd`. `botmgr systemd render-manager` /
+`render-bot` print the unit files for review without installing
+anything. Full details, including per-bot units and their resource
+limits, are in [systemd.md](systemd.md).
 
 ## 4. First-run setup
 
 1. Open `http://<host>:8000/`. With no administrator existing yet, you
    are redirected to the setup page.
-2. Enter the **setup token**. It is printed in the manager's log at
-   first start and stored in `<root>/setup-token` (mode 600):
+2. Enter the **setup token**. The installer prints it at the end of
+   the run; it is also printed in the manager's log at first start and
+   stored in `<root>/setup-token` (mode 600):
 
    ```sh
-   sudo cat /srv/botenclave/setup-token        # quickstart
-   sudo journalctl -u botenclave | grep setup  # production
+   sudo cat /srv/botenclave/setup-token
+   sudo journalctl -u botenclave | grep setup
    ```
 
    The token file is deleted once setup completes; if you lose it
@@ -178,16 +170,16 @@ only. Do not use it on a reachable host.
 - [ ] Audit log retention fits your needs (default 180 days;
       `botmgr audit purge --days N`, `botmgr audit verify` checks
       the hash chain).
-- [ ] Manager restarts cleanly (`systemctl restart botenclave`, or
-      re-run the quickstart command) and running bots are reconciled
-      — adopted if still alive, marked crashed if gone.
+- [ ] Manager restarts cleanly (`systemctl restart botenclave`) and
+      running bots are reconciled — adopted if still alive, marked
+      crashed if gone.
 
 ## 8. Troubleshooting
 
 | Symptom | Likely cause and fix |
 |---|---|
 | Manager exits with “already running” | Another `botmgr serve` holds the lock on this root, or a previous one is still alive. Check `pgrep -af botmgr` before assuming a stale lock. |
-| Bot fails to start with permission errors | The package directory or a release/venv is not readable/executable by the bot's OS user. Reinstall into a world-readable location (see [§2](#2-install-the-package)); do not `chmod` a private home directory open as a workaround. |
+| Bot fails to start with permission errors | The package directory or a release/venv is not readable/executable by the bot's OS user. Reinstall into a world-readable location (see [§2](#2-automated-setup-recommended)); do not `chmod` a private home directory open as a workaround. |
 | Bot sits in `secret-pending` | Its environment values are not resolvable: the memory-only backend lost them on manager restart (re-enter them), or the bot runs under a systemd unit with a non-systemd-creds backend (switch the backend in the Environment section). |
 | Login page loops back after signing in | Cookie not being sent: you are on plain HTTP with `Secure` cookies. Use HTTPS / a proxy (§6), or `--no-cookie-secure` for local development only. |
 | Deploy rejects a zip | It contains absolute paths, `..` entries or symlinks, or exceeds the size limit. Repack with plain relative file paths. |
@@ -199,10 +191,10 @@ only. Do not use it on a reachable host.
 Stop the manager, stop all bots, then remove the units and files:
 
 ```sh
-sudo systemctl disable --now botenclave                 # production
+sudo systemctl disable --now botenclave
 sudo botmgr --root /srv/botenclave bot-list             # stop/remove bots first
 sudo rm -f /etc/systemd/system/botenclave*.service \
-           /etc/sudoers.d/botenclave                    # production artifacts
+           /etc/sudoers.d/botenclave
 sudo systemctl daemon-reload
 sudo rm -rf /usr/local/lib/botenclave /srv/botenclave
 # per-bot OS users remain; remove with: sudo userdel bm-<name>

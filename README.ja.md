@@ -47,33 +47,29 @@ BotEnclave は**互いに素性の知れた小規模グループ**（管理者�
 - Linux（または WSL2）
 - Python 3.11+
 - ホストに `tmux` と `git`
-- 任意（推奨）: systemd（Bot ごとのユニットと標準シークレット
-  バックエンド用）、sudo（本番構成のヘルパー設置用）
+- systemd と sudo（サポートする構成は管理アプリを systemd で動かし、
+  ヘルパーへは sudo 経由で到達します）
 
 ## インストール
 
 ```sh
 git clone https://github.com/maguro923/BotEnclave.git
 cd BotEnclave
-python3 -m venv /usr/local/lib/botenclave/venv
-/usr/local/lib/botenclave/venv/bin/pip install .
+sudo sh scripts/install.sh
 ```
 
-パッケージは Bot ユーザーが読める場所へインストールしてください
-（ランチャ shim と tmux 設定をそこから読みます）。
+インストーラが本番構成を一括でセットアップします。前提パッケージ
+（Debian/Ubuntu）、`/usr/local/lib/botenclave/venv` へのパッケージ
+導入（Bot ユーザーが読める場所です。ランチャ shim と tmux 設定を
+そこから読みます）、管理ユーザー `botenclave`、データルート
+`/srv/botenclave`、systemd ユニット、初回起動までを行います。
+冪等で、再実行できます。手作業の手順は
+[docs/setup.md](docs/setup.md) にあります。
 
-## クイックスタート（簡易シングルホストモード）
-
-このモードではヘルパーが同一プロセスで動くため、管理対象のホストで
-root として起動します。実運用では後述の本番構成を推奨します。
-
-```sh
-sudo /usr/local/lib/botenclave/venv/bin/botmgr --root /srv/botenclave \
-    serve --port 8000
-```
+## 最初のステップ
 
 1. `http://<ホスト>:8000/` を開くと初回セットアップへ誘導されます。
-   セットアップトークンはサーバーログに表示され、
+   セットアップトークンはインストール実行の最後に表示され、
    `/srv/botenclave/setup-token`（権限 600）にも保存されます。
 2. 管理者アカウントを作成してサインインします。
 3. ダッシュボードで **Bot を追加**（名前＋コマンド）し、Bot のページの
@@ -91,7 +87,7 @@ sudo /usr/local/lib/botenclave/venv/bin/botmgr --root /srv/botenclave \
 ください。セッション Cookie は既定で `Secure` で、`--no-cookie-secure`
 はローカル開発専用です。
 
-## 本番構成（systemd）
+## 構成（systemd）
 
 セキュリティ設計が前提とする構成（管理アプリは専用の非特権ユーザー、
 ヘルパーは狭い sudoers ルール経由、Bot ごとに systemd ユニット）は

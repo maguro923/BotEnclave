@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added `scripts/install.sh`: one-shot production setup
+  (prerequisites, package, manager user, systemd unit, first start).
+  Idempotent.
+- Removed the quickstart (single-host) layout from the documentation.
+  The systemd layout is the one supported setup, and the installer
+  script performs it.
+
 ## 0.1.0 — 2026-11-26
 
 First release.

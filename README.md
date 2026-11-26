@@ -50,34 +50,29 @@ offered to untrusted strangers.
 - Linux (or WSL2)
 - Python 3.11+
 - `tmux` and `git` on the host
-- Optional but recommended: systemd (for per-bot units and the
-  standard secret backend) and sudo (for the production helper setup)
+- systemd and sudo (the supported layout runs the manager under
+  systemd and reaches the helper through sudo)
 
 ## Install
 
 ```sh
 git clone https://github.com/maguro923/BotEnclave.git
 cd BotEnclave
-python3 -m venv /usr/local/lib/botenclave/venv
-/usr/local/lib/botenclave/venv/bin/pip install .
+sudo sh scripts/install.sh
 ```
 
-The package must be installed somewhere the bot users can read (they
-load the launcher shim and the tmux configuration from it).
+The installer sets up the production layout: prerequisites
+(Debian/Ubuntu), the package in `/usr/local/lib/botenclave/venv` (a
+location the bot users can read — they load the launcher shim and the
+tmux configuration from it), the `botenclave` manager user, the data
+root `/srv/botenclave`, the systemd unit, and the first start. It is
+idempotent; the manual steps are in [docs/setup.md](docs/setup.md).
 
-## Quickstart (simple single-host mode)
-
-This mode runs the helper in-process, so start it as root on a host
-you control; the production layout below is preferred for real use.
-
-```sh
-sudo /usr/local/lib/botenclave/venv/bin/botmgr --root /srv/botenclave \
-    serve --port 8000
-```
+## First steps
 
 1. Open `http://<host>:8000/` — you are redirected to the first-run
-   setup. The setup token is printed in the server log and stored in
-   `/srv/botenclave/setup-token` (mode 600).
+   setup. The setup token is printed at the end of the install run
+   and stored in `/srv/botenclave/setup-token` (mode 600).
 2. Create the administrator account, then sign in.
 3. **Add a bot** on the dashboard (name + command), open its page, and
    deploy code from the **Deploy** section (git URL or zip upload).
@@ -94,11 +89,11 @@ Serve over HTTPS (or behind a TLS-terminating proxy) outside a trusted
 LAN: session cookies are `Secure` by default, and `--no-cookie-secure`
 exists only for local development.
 
-## Production layout (systemd)
+## Layout (systemd)
 
-For the layout the security design assumes — manager as its own
+The layout the security design assumes — manager as its own
 unprivileged user, helper via a narrow sudoers rule, one systemd unit
-per bot — see [docs/systemd.md](docs/systemd.md).
+per bot — is described in [docs/systemd.md](docs/systemd.md).
 
 ## Secret backends
 
