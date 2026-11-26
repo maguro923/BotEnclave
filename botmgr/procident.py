@@ -46,6 +46,13 @@ def _read_start_time(pid: int) -> int | None:
         return None
 
 
+def start_time_of(pid: int) -> int | None:
+    """The process's start time, or None if it is gone/unreadable. A
+    recycled PID never reuses a start time, so comparing this value is
+    how callers prove a PID still names the process they snapshotted."""
+    return _read_start_time(pid)
+
+
 def read_identity(pid: int) -> ProcessIdentity | None:
     start_time = _read_start_time(pid)
     if start_time is None:

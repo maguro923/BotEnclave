@@ -13,8 +13,10 @@ Response shape: {"ok": true, "result": {...}} or
 from __future__ import annotations
 
 import dataclasses
+import grp
 import json
 import os
+import pwd
 import re
 import shlex
 import subprocess
@@ -525,34 +527,42 @@ class SystemExecutor:
         launch["env"] = env
         fifo = data_dir / f".launch-{os.urandom(6).hex()}.fifo"
         os.mkfifo(fifo, 0o600)
-        _run(["chown", f"{user}:{user}", str(fifo)])
         package_parent = str(self.package_dir.parent)
         pane_command = (
             f"PYTHONPATH={package_parent} exec /usr/bin/python3"
             f" -m botmgr.launcher {fifo}"
         )
-        # A leftover session can only be a zombie: the supervisor calls
-        # start only for bots it believes are stopped, and a live one
-        # would have been adopted by reconcile instead. Clear it so a
-        # crashed predecessor cannot block the start forever.
-        self._tmux(bot, "kill-session", "-t", "main")
-        # The server reads botmgr/tmux.conf at start (via -f in _tmux), so
-        # default-shell and remain-on-exit already apply to this first pane.
-        proc = self._tmux(
-            bot,
-            "new-session",
-            "-d",
-            "-s",
-            "main",
-            "-x",
-            "200",
-            "-y",
-            "50",
-            pane_command,
-        )
-        if proc.returncode != 0:
+        try:
+            _run(["chown", f"{user}:{user}", str(fifo)])
+            # A leftover session can only be a zombie: the supervisor calls
+            # start only for bots it believes are stopped, and a live one
+            # would have been adopted by reconcile instead. Clear it so a
+            # crashed predecessor cannot block the start forever.
+            self._tmux(bot, "kill-session", "-t", "main")
+            # The server reads botmgr/tmux.conf at start (via -f in
+            # _tmux), so default-shell and remain-on-exit already apply to
+            # this first pane.
+            proc = self._tmux(
+                bot,
+                "new-session",
+                "-d",
+                "-s",
+                "main",
+                "-x",
+                "200",
+                "-y",
+                "50",
+                pane_command,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"tmux new-session failed: {proc.stderr.strip()}"
+                )
+        except Exception:
+            # _tmux raises on timeout instead of returning a failed
+            # process; the FIFO must not leak on that path either.
             fifo.unlink(missing_ok=True)
-            raise RuntimeError(f"tmux new-session failed: {proc.stderr.strip()}")
+            raise
         try:
             # Attach log capture before the bot starts producing output.
             self.set_capture(bot, True)
@@ -660,11 +670,26 @@ class SystemExecutor:
     def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]:
         return fileops.read_file(self._bot_root(bot), zone, rel)
 
+    def _chown_to_bot(self, bot: str, path: Path) -> None:
+        """Hand a helper-created path to the bot's user. The helper runs
+        as root, so without this a panel-written file lands root-owned
+        0600 inside the bot's data/ and the bot cannot read its own
+        working files."""
+        try:
+            entry = pwd.getpwnam(username_for(bot))
+        except KeyError:
+            return
+        os.chown(path, entry.pw_uid, entry.pw_gid)
+
     def file_write(self, bot: str, zone: str, rel: str, content: str) -> None:
         fileops.write_file(self._bot_root(bot), zone, rel, content)
+        self._chown_to_bot(bot, self._bot_root(bot) / zone / rel)
 
     def file_mkdir(self, bot: str, zone: str, rel: str) -> None:
         fileops.make_dir(self._bot_root(bot), zone, rel)
+        target = self._bot_root(bot) / zone / rel
+        self._chown_to_bot(bot, target)
+        target.chmod(0o750)
 
     def file_delete(self, bot: str, zone: str, rel: str) -> None:
         fileops.delete_path(self._bot_root(bot), zone, rel)
@@ -677,12 +702,20 @@ class SystemExecutor:
         if procident.verify(identity):
             targets = _descendants_of(identity.pid)
             targets.add(identity.pid)
+            # Remember each target's start time: the grace wait below can
+            # take a minute, and a PID recycled in that window must never
+            # be signalled — it names an unrelated process by then.
+            snapshot = {
+                pid: start
+                for pid in targets
+                if (start := procident.start_time_of(pid)) is not None
+            }
             _signal_all(targets, 15)  # SIGTERM
             deadline = time.monotonic() + grace
             while time.monotonic() < deadline and procident.verify(identity):
                 time.sleep(0.1)
             if procident.verify(identity):
-                _signal_all(targets, 9)  # SIGKILL
+                _signal_all(_still_ours(snapshot), 9)  # SIGKILL
                 for _ in range(20):
                     if not procident.verify(identity):
                         break
@@ -691,12 +724,7 @@ class SystemExecutor:
             # process group with setsid but is still our descendant by birth
             # is impossible after reparenting; this catches the ones that
             # were still in the tree when we snapshotted it).
-            for pid in targets:
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    continue
-                _signal_all({pid}, 9)
+            _signal_all(_still_ours(snapshot), 9)
             exit_code = self._pane_exit_code(bot)
         self._tmux(bot, "kill-session", "-t", "main")
         # If the bot also has a systemd unit, stop it so the unit's main
@@ -768,12 +796,33 @@ def _signal_all(pids: set[int], sig: int) -> None:
             pass
 
 
+def _still_ours(snapshot: dict[int, int]) -> set[int]:
+    """Filter a {pid: start_time} snapshot to processes that are still
+    the very processes it recorded (same PID, same start time)."""
+    return {
+        pid
+        for pid, start in snapshot.items()
+        if procident.start_time_of(pid) == start
+    }
+
+
 def main(argv: list[str]) -> int:
     root = Path(os.environ.get("BOTENCLAVE_ROOT", str(DEFAULT_ROOT)))
     package_dir_env = os.environ.get("BOTENCLAVE_PACKAGE_DIR")
     package_dir = Path(package_dir_env) if package_dir_env else None
+    manager_group = os.environ.get("BOTENCLAVE_MANAGER_GROUP") or None
+    if manager_group is None and "SUDO_USER" not in os.environ:
+        # Direct (non-sudo) run: the manager is this same user, so its
+        # primary group is the group that needs read access to bot logs.
+        try:
+            manager_group = grp.getgrgid(os.getegid()).gr_name
+        except KeyError:
+            manager_group = None
     helper = Helper(
-        root=root, executor=SystemExecutor(root, package_dir=package_dir)
+        root=root,
+        executor=SystemExecutor(
+            root, manager_group=manager_group, package_dir=package_dir
+        ),
     )
     raw = sys.stdin.read()
     try:

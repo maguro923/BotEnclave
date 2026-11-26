@@ -151,3 +151,15 @@ def test_supervisor_secret_pending(tmp_path: Path) -> None:
         supervisor.start("alpha")
     assert supervisor.state("alpha") is BotState.SECRET_PENDING
     assert backend.started == []
+
+
+def test_missing_fernet_artifact_with_recorded_keys_is_pending(
+    tmp_path: Path, store: StateStore
+) -> None:
+    service = SecretsService(tmp_path, store)
+    service.set_env("alpha", {"DISCORD_TOKEN": "x"}, "fernet")
+    (tmp_path / "secrets" / "alpha.env.enc").unlink()
+    # Keys are on record but the values are gone: the bot must resolve
+    # as secret-pending, never start with an empty environment.
+    assert service.resolve("alpha").env is None
+    assert service.pending("alpha") is True

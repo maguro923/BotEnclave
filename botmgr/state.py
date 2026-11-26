@@ -101,6 +101,8 @@ class BotStateMachine:
     def request_stop(self, now: float) -> None:
         if self._state in (BotState.STARTING, BotState.RUNNING):
             self._state = BotState.STOPPING
+        elif self._state is BotState.STOPPING:
+            pass  # already stopping: a failed stop stays retryable
         elif self._state is BotState.BACKOFF:
             self._retry_at = None
             self._state = BotState.STOPPED

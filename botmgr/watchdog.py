@@ -63,14 +63,20 @@ class Watchdog:
     def step(self) -> list[str]:
         events: list[str] = []
         self._steps += 1
-        self._supervisor.tick()
+        try:
+            self._supervisor.tick()
+        except Exception:  # noqa: BLE001 - the watchdog must survive a supervision failure
+            events.append("supervisor tick failed")
         for bot in self._supervisor.bot_ids():
-            state = self._supervisor.state(bot)
-            if state is BotState.RUNNING:
-                events.extend(self._check_running(bot))
-            log_path = self._root / "bots" / bot / "logs" / "console.log"
-            if logfiles.rotate_copytruncate(log_path):
-                events.append(f"{bot}: console log rotated")
+            try:
+                state = self._supervisor.state(bot)
+                if state is BotState.RUNNING:
+                    events.extend(self._check_running(bot))
+                log_path = self._root / "bots" / bot / "logs" / "console.log"
+                if logfiles.rotate_copytruncate(log_path):
+                    events.append(f"{bot}: console log rotated")
+            except Exception:  # noqa: BLE001 - one bot's failure must not stop the others
+                events.append(f"{bot}: watchdog check failed")
             if self._usage_sink is not None and self._steps % self._disk_every == 0:
                 # Low-frequency disk measurement for the guest quota
                 # (PLAN 1.5 / 3.2); the helper walks the tree as root

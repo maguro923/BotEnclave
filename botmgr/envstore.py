@@ -128,6 +128,14 @@ class SecretsService:
             path.chmod(0o600)
         else:
             self._memory[bot] = dict(env)
+        self._write_meta(bot, sorted(env))
+        # Point the store at the new backend BEFORE erasing the old
+        # artifact: until this commit, resolve() still uses the old
+        # backend, whose artifact must therefore still exist. Erasing
+        # first would leave a crash window where the store names a
+        # backend whose values are gone, and the bot would start with
+        # an empty environment instead of secret-pending.
+        self._store.set_secret_backend(bot, backend)
         # One operation: erase the other backends' artifacts (PLAN 3.3).
         if backend != "systemd-creds":
             self._cred_path(bot).unlink(missing_ok=True)
@@ -135,8 +143,6 @@ class SecretsService:
             self._enc_path(bot).unlink(missing_ok=True)
         if backend != "memory":
             self._memory.pop(bot, None)
-        self._write_meta(bot, sorted(env))
-        self._store.set_secret_backend(bot, backend)
         token = env.get(TOKEN_KEY)
         self._store.set_token_hash(
             bot,
@@ -188,6 +194,10 @@ class SecretsService:
         backend = stored.secret_backend if stored else "fernet"
         if backend == "systemd-creds":
             if not self._cred_path(bot).exists():
+                if self.keys(bot):
+                    # Keys are recorded but the credential is gone:
+                    # pending, not "start with nothing".
+                    return EnvResolution(env=None, dotenv_mode=dotenv)
                 return EnvResolution(env={}, dotenv_mode=dotenv)
             return EnvResolution(env={}, use_credential=True, dotenv_mode=dotenv)
         if backend == "memory":
@@ -199,6 +209,8 @@ class SecretsService:
         # fernet
         path = self._enc_path(bot)
         if not path.exists():
+            if self.keys(bot):
+                return EnvResolution(env=None, dotenv_mode=dotenv)
             return EnvResolution(env={}, dotenv_mode=dotenv)
         try:
             text = decrypt_text(

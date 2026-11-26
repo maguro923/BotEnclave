@@ -8,6 +8,27 @@
 - Removed the quickstart (single-host) layout from the documentation.
   The systemd layout is the one supported setup, and the installer
   script performs it.
+- Fixed a pre-UI-change bug-hunt pass (32 new regression tests):
+  supervision now survives one bot's helper failure instead of stopping
+  for every bot, and a failed stop stays retryable; the manager group
+  is wired into bot directory ownership so the panel can read bot logs
+  in the systemd layout; private console mode can no longer be
+  overridden by the watchdog's capture repair; process sweeps verify
+  start times before SIGKILL; first-run setup is atomic under
+  concurrency; short passwords return 400 instead of 500; lockouts
+  consume the failure count and second-factor failures count toward
+  them; a torn audit line no longer breaks viewing or startup, and a
+  full retention purge keeps the hash chain valid across restarts;
+  downloads support non-ASCII filenames; bot creation no longer
+  confirms other users' bot names; deploy permission publishing never
+  follows symlinks; git credentials are stripped from the cloned
+  release's `.git/config`; a failed activation restores the previous
+  release; the deploy worker timeout exceeds its stage budgets and a
+  timeout kills the whole worker tree; panel-written files belong to
+  the bot user; secret backend migration cannot strand a bot with an
+  empty environment; backup restore sanitizes manifest paths; the
+  Fernet key is created atomically; `bot-remove` (CLI) deletes the
+  bot's secrets like the web path does.
 
 ## 0.1.0 — 2026-11-26
 

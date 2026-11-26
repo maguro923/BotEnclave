@@ -131,8 +131,21 @@ def _systemd_command(args: argparse.Namespace) -> int:
     if command == "install":
         entry = Path(systemd_units.HELPER_ENTRY_PATH)
         entry.parent.mkdir(parents=True, exist_ok=True)
+        manager_group: str | None = None
+        try:
+            import grp
+            import pwd
+
+            manager_group = grp.getgrgid(
+                pwd.getpwnam(args.manager_user).pw_gid
+            ).gr_name
+        except KeyError:
+            manager_group = None
         entry.write_text(
-            systemd_units.render_helper_entry(root, package_dir), encoding="utf-8"
+            systemd_units.render_helper_entry(
+                root, package_dir, manager_group=manager_group
+            ),
+            encoding="utf-8",
         )
         entry.chmod(0o755)
         print(f"wrote {entry}")
@@ -374,6 +387,14 @@ def main(argv: list[str] | None = None) -> int:
             if supervisor.state(args.bot).value not in ("stopped", "attention"):
                 supervisor.stop(args.bot)
             runtime.store.remove_bot(args.bot)
+            # Match the web delete path: the bot's secret artifacts and
+            # webhook secret must not survive, or a later bot reusing
+            # the name silently inherits them.
+            from botmgr.envstore import SecretsService
+            from botmgr.webhooks import WebhookSecrets
+
+            SecretsService(args.root, runtime.store).delete(args.bot)
+            WebhookSecrets(args.root).delete(args.bot)
             print(f"removed {args.bot}")
         elif args.command == "bot-list":
             supervisor.tick()

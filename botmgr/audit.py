@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -68,9 +69,16 @@ class AuditLog:
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     try:
-                        self._last_hash = json.loads(line)["hash"]
-                    except (ValueError, KeyError):
+                        parsed = json.loads(line)
+                    except ValueError:
                         continue
+                    if isinstance(parsed, dict):
+                        if "hash" in parsed:
+                            self._last_hash = str(parsed["hash"])
+                        elif "anchor" in parsed:
+                            # A purge marker: the chain continues from
+                            # the anchor even when no entries survive.
+                            self._last_hash = str(parsed["anchor"])
 
     def record(
         self, actor: str, action: str, target: str = "", detail: str = ""
@@ -89,8 +97,16 @@ class AuditLog:
             ).hexdigest()
             entry["hash"] = digest
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry) + "\n")
+            with open(self._path, "a+b") as fh:
+                # If a crash tore the previous append, terminate that
+                # fragment first: gluing the new entry onto it would
+                # lose the new entry inside an unparseable line.
+                fh.seek(0, os.SEEK_END)
+                if fh.tell() > 0:
+                    fh.seek(-1, os.SEEK_END)
+                    if fh.read(1) != b"\n":
+                        fh.write(b"\n")
+                fh.write((json.dumps(entry) + "\n").encode())
             self._last_hash = digest
             if self._mirror is not None:
                 # Best effort: the chained file is the primary record and
@@ -106,8 +122,14 @@ class AuditLog:
         entries: list[dict[str, object]] = []
         for line in self._path.read_text(encoding="utf-8").splitlines():
             if line.strip():
-                entry = json.loads(line)
-                if "purged_through" not in entry:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    # A torn final line (crash mid-append) must not make
+                    # the whole log unreadable — or block the manager's
+                    # startup retention purge.
+                    continue
+                if isinstance(entry, dict) and "purged_through" not in entry:
                     entries.append(entry)
         return entries
 
@@ -139,8 +161,11 @@ class AuditLog:
             for line in self._path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
-                first = json.loads(line)
-                if "purged_through" in first:
+                try:
+                    first = json.loads(line)
+                except ValueError:
+                    break
+                if isinstance(first, dict) and "purged_through" in first:
                     prev = str(first["anchor"])
                 break
         for entry in self.read_all():

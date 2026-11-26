@@ -411,8 +411,13 @@ def create_app(config: AppConfig) -> FastAPI:
             or not all(isinstance(part, str) for part in command)
         ):
             raise HTTPException(status_code=400, detail="command must be a non-empty list")
-        if store.get_bot(name) is not None:
-            raise HTTPException(status_code=409, detail="bot already exists")
+        existing = store.get_bot(name)
+        if existing is not None:
+            if user.is_superuser or existing.owner_id == user.id:
+                raise HTTPException(status_code=409, detail="bot already exists")
+            # Another user's bot: answer exactly like a validation
+            # failure so the name's existence is not confirmed.
+            raise HTTPException(status_code=400, detail="invalid bot name")
         quota = guest_quota_error(user, adding_bot=True)
         if quota is not None:
             raise HTTPException(status_code=403, detail=quota)
@@ -756,6 +761,7 @@ def create_app(config: AppConfig) -> FastAPI:
         stored: StoredBot = Depends(bot_access),
     ) -> Response:
         import base64
+        from urllib.parse import quote
 
         try:
             result = await run_in_threadpool(
@@ -768,10 +774,21 @@ def create_app(config: AppConfig) -> FastAPI:
         else:
             data = base64.b64decode(str(result["content_b64"]))
         name = Path(path).name or "download"
+        # RFC 5987: a raw non-ASCII name cannot be encoded into the
+        # header (Starlette raises) — send an ASCII fallback plus the
+        # percent-encoded UTF-8 form.
+        fallback = (
+            name.encode("ascii", "ignore").decode().replace('"', "_").replace("\\", "_")
+            or "download"
+        )
+        disposition = (
+            f'attachment; filename="{fallback}"; '
+            f"filename*=UTF-8''{quote(name)}"
+        )
         return Response(
             content=data,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+            headers={"Content-Disposition": disposition},
         )
 
     @app.put("/api/bots/{bot_id}/files/content")
@@ -800,17 +817,18 @@ def create_app(config: AppConfig) -> FastAPI:
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
     ) -> dict[str, str]:
+        zone = body.get("zone", "data")
         try:
             await run_in_threadpool(
                 client.file_mkdir,
                 stored.bot_id,
-                body.get("zone", "data"),
+                zone,
                 body.get("path", ""),
             )
         except HelperError as exc:
             raise _file_error(exc) from None
         audit.record(
-            user.email, "file.mkdir", stored.bot_id, f"data:{body.get('path', '')}"
+            user.email, "file.mkdir", stored.bot_id, f"{zone}:{body.get('path', '')}"
         )
         return {"status": "ok"}
 
@@ -1092,7 +1110,10 @@ async def _verify_discord_token(token: str) -> dict[str, str] | None:
 
 async def _watchdog_loop(watchdog: Watchdog, audit: AuditLog) -> None:
     while True:
-        events = await run_in_threadpool(watchdog.step)
+        try:
+            events = await run_in_threadpool(watchdog.step)
+        except Exception:  # noqa: BLE001 - supervision must never die silently
+            events = ["watchdog step failed"]
         for event in events:
             audit.record("system", "watchdog", "", event)
         await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)

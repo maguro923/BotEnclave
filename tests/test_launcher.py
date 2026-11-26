@@ -129,3 +129,13 @@ def test_shim_delivers_environment_through_fifo(tmp_path: Path) -> None:
     assert lines["CWD"] == str(tmp_path)
     assert lines["NOFILE"] == "256"
     assert not fifo.exists(), "shim must remove the FIFO after reading it"
+
+
+def test_env_round_trip_survives_splitlines_characters() -> None:
+    from botmgr.launcher import format_env_text
+
+    env = {
+        "PLAIN": "a\x0bb\x0cc",
+        "QUOTED": "x\u2028y\x85z",
+    }
+    assert parse_env_text(format_env_text(env)) == env

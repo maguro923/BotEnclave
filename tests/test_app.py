@@ -632,3 +632,43 @@ def test_xss_log_content_stays_inert(
     # Server-rendered pages never embed raw log content.
     page = admin.get("/bots/alpha")
     assert payload not in page.text
+
+
+def test_download_with_non_ascii_filename(env: tuple[TestClient, FakeHelper, Path]) -> None:
+    client, _fake, _root = env
+    admin = setup_admin(client, _root)
+    create_bot(admin, "alpha")
+    resp = admin.put(
+        "/api/bots/alpha/files/content",
+        json={"zone": "data", "path": "レポート.txt", "content": "hello"},
+    )
+    assert resp.status_code == 200, resp.text
+    resp = admin.get(
+        "/api/bots/alpha/files/download",
+        params={"zone": "data", "path": "レポート.txt"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.content == b"hello"
+    disposition = resp.headers["content-disposition"]
+    assert "filename*=UTF-8''" in disposition
+
+
+def test_bot_create_does_not_confirm_other_users_bot_names(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "shared-name")
+    guest = invite_and_login(admin, client, "guest2@example.com")
+    # The guest must not learn that the name is taken by someone else:
+    # the answer is the same as for an invalid name.
+    resp = guest.post(
+        "/api/bots", json={"name": "shared-name", "command": ["python3", "bot.py"]}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid bot name"
+    # The owner (here the admin) does get the precise conflict.
+    resp = admin.post(
+        "/api/bots", json={"name": "shared-name", "command": ["python3", "bot.py"]}
+    )
+    assert resp.status_code == 409

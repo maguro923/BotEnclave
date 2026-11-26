@@ -162,7 +162,9 @@ def restore_backup(archive: Path, root: Path, *, force: bool = False) -> list[st
         if manifest.get("format") != FORMAT_VERSION:
             raise BackupError(f"unknown backup format: {manifest.get('format')!r}")
         for rel, expected in manifest["files"].items():
-            target = stage / rel
+            # Manifest keys are archive-controlled input, exactly like
+            # member names: sanitize them before building any path.
+            target = stage / _safe_member_name(rel)
             if not target.exists() or _hash_file(target) != expected:
                 raise BackupError(f"backup integrity check failed for {rel}")
         restored: list[str] = []
@@ -177,8 +179,9 @@ def restore_backup(archive: Path, root: Path, *, force: bool = False) -> list[st
             "keys/web-secret": "web-secret",
         }
         for rel in manifest["files"]:
-            source = stage / rel
-            dest_rel = mapping.get(rel, rel)
+            safe_rel = _safe_member_name(rel)
+            source = stage / safe_rel
+            dest_rel = mapping.get(safe_rel, safe_rel)
             dest = root / dest_rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, dest)

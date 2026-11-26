@@ -283,3 +283,93 @@ def test_temp_password_rate_limit(app_and_service) -> None:  # type: ignore[no-u
     assert resp.status_code == 429
     with __import__("pytest").raises(TempPasswordRateLimited):
         _asyncio.run(service.issue_temp_password(user_id))
+
+
+def test_concurrent_setup_creates_exactly_one_admin(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    _app, service = app_and_service
+
+    async def attempt() -> list[object]:
+        return await asyncio.gather(
+            service.create_first_admin("first@example.com", ADMIN_PASSWORD),
+            service.create_first_admin("second@example.com", ADMIN_PASSWORD),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(attempt())
+    created = [r for r in results if not isinstance(r, Exception)]
+    rejected = [r for r in results if isinstance(r, ValueError)]
+    assert len(created) == 1
+    assert len(rejected) == 1
+    assert asyncio.run(service.count_users()) == 1
+
+
+def test_setup_short_password_is_400_and_setup_still_possible(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    client = make_client(app)
+    resp = client.post(
+        "/setup",
+        json={"token": "setup-token-123", "email": ADMIN_EMAIL, "password": "short"},
+    )
+    assert resp.status_code == 400
+    do_setup(client)  # a failed attempt must not consume the setup
+
+
+def test_change_password_short_password_is_400(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    client = admin_client(app)
+    resp = client.post(
+        "/auth/change-password",
+        json={"current_password": ADMIN_PASSWORD, "new_password": "short"},
+    )
+    assert resp.status_code == 400
+
+
+def test_lock_consumes_the_failure_count(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, service = app_and_service
+    client = make_client(app)
+    do_setup(client)
+    for _ in range(5):
+        login(client, ADMIN_EMAIL, "wrong-password")
+    user = asyncio.run(service.get_by_email(ADMIN_EMAIL))
+    assert user is not None
+    assert user.locked_until is not None
+    # Once the lock expires the budget must be fresh: the counter was
+    # consumed when the lock was applied, not left at the threshold.
+    assert user.failed_login_count == 0
+
+
+def test_totp_failures_count_toward_lockout(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    admin = admin_client(app)
+    enrolled = admin.post("/auth/totp/enroll")
+    secret = enrolled.json()["secret"]
+    code = pyotp.TOTP(secret).now()
+    assert admin.post("/auth/totp/confirm", json={"code": code}).status_code == 200
+    fresh = make_client(app)
+    for _ in range(5):
+        resp = login(fresh, ADMIN_EMAIL, ADMIN_PASSWORD, totp_code="000000")
+        assert resp.status_code == 400  # type: ignore[attr-defined]
+    locked = login(
+        fresh, ADMIN_EMAIL, ADMIN_PASSWORD, totp_code=pyotp.TOTP(secret).now()
+    )
+    assert locked.status_code == 423  # type: ignore[attr-defined]
+
+
+def test_login_rate_limiter_evicts_stale_keys() -> None:
+    from botmgr.auth.routes import _LoginRateLimiter
+
+    limiter = _LoginRateLimiter()
+    for i in range(5000):
+        limiter._hits[f"host|user{i}@example.com"] = [0.0]  # long aged out
+    assert limiter.allow("host|fresh@example.com") is True
+    assert len(limiter._hits) < 100

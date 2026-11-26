@@ -7,6 +7,7 @@ Every one must be refused, while normal operations keep working.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -121,3 +122,25 @@ def test_mkdir_delete_rename(bot_root: Path) -> None:
     # Non-empty directories cannot be deleted.
     with pytest.raises(OSError):
         fileops.delete_path(bot_root, "data", "sub")
+
+
+def test_read_cap_applies_to_a_file_growing_past_fstat(
+    bot_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A running bot appending to the file must not defeat the cap: the
+    # fstat size passes, but the bytes actually read are counted too.
+    target = bot_root / "data" / "growing.log"
+    target.write_bytes(b"x" * 64)
+    real_fstat = os.fstat
+
+    def lying_fstat(fd: int) -> os.stat_result:
+        result = real_fstat(fd)
+        return os.stat_result((result.st_mode, result.st_ino, result.st_dev,
+                               result.st_nlink, result.st_uid, result.st_gid,
+                               4, result.st_atime, result.st_mtime, result.st_ctime))
+
+    monkeypatch.setattr(fileops, "MAX_READ_BYTES", 8)
+    monkeypatch.setattr(os, "fstat", lying_fstat)
+    with pytest.raises(FileOpError) as excinfo:
+        fileops.read_file(bot_root, "data", "growing.log")
+    assert excinfo.value.code == "too_large"

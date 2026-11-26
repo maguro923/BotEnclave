@@ -65,3 +65,34 @@ def test_purge_keeps_chain_verifiable(tmp_path: Path) -> None:
     # Recording after a purge continues the surviving chain.
     log2.record("a", "after.purge", "x")
     assert log2.verify_chain() is True
+
+
+def test_torn_last_line_does_not_break_reading_or_purge(tmp_path: Path) -> None:
+    path = tmp_path / "audit.log"
+    log = AuditLog(path)
+    log.record("alice", "bot.start", "alpha")
+    log.record("alice", "bot.stop", "alpha")
+    # Simulate a crash mid-append: a truncated final line.
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write('{"ts": 123, "actor": "alice", "act')
+    reopened = AuditLog(path)
+    assert len(reopened.read_all()) == 2
+    assert reopened.verify_chain() is True
+    assert reopened.purge(before_ts=0.0) == 0  # startup purge must not raise
+    reopened.record("bob", "bot.start", "beta")
+    assert len(reopened.read_all()) == 3
+
+
+def test_purge_all_then_restart_keeps_chain_valid(tmp_path: Path) -> None:
+    path = tmp_path / "audit.log"
+    log = AuditLog(path)
+    log.record("alice", "bot.start", "alpha")
+    log.record("alice", "bot.stop", "alpha")
+    dropped = log.purge(before_ts=time.time() + 60)
+    assert dropped == 2
+    assert log.read_all() == []
+    # After a restart the next entry must chain from the purge anchor,
+    # not from genesis, or verification fails forever.
+    reopened = AuditLog(path)
+    reopened.record("bob", "bot.start", "beta")
+    assert reopened.verify_chain() is True

@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi_users.authentication.strategy.db import DatabaseStrategy
+from fastapi_users.exceptions import InvalidPasswordException
 
 from botmgr.auth.deps import COOKIE_NAME, AuthBundle
 from botmgr.auth.models import User
@@ -68,6 +69,15 @@ class _LoginRateLimiter:
 
     def allow(self, key: str) -> bool:
         now = time.time()
+        if len(self._hits) > 4096:
+            # Keys are per (client, email) and arrive unauthenticated, so
+            # without eviction the map grows by one entry per distinct
+            # email forever. Drop keys whose attempts all aged out.
+            self._hits = {
+                k: v
+                for k, v in self._hits.items()
+                if v and now - v[-1] < LOGIN_RATE_WINDOW
+            }
         hits = [t for t in self._hits.get(key, []) if now - t < LOGIN_RATE_WINDOW]
         if len(hits) >= LOGIN_RATE_LIMIT:
             self._hits[key] = hits
@@ -117,8 +127,12 @@ def build_auth_router(
                 # is consumed by the attempt (single-use, PLAN 3.2).
                 ok = await service.consume_backup_code(user, body.totp_code)
             if not ok:
+                # Second-factor failures count toward the account
+                # lockout just like password failures do.
+                await service.record_failure(body.email)
                 audit(body.email, "login.failure", detail="totp")
                 raise HTTPException(status_code=400, detail="LOGIN_BAD_TOTP")
+        await service.note_login_success(user)
         audit(body.email, "login.success")
         login_response = await bundle.backend.login(strategy, user)
         response = JSONResponse(
@@ -153,9 +167,13 @@ def build_auth_router(
         body: ChangePasswordRequest,
         user: User = Depends(current_user),  # type: ignore[arg-type]
     ) -> dict[str, str]:
-        if not await service.change_password(
-            user, body.current_password, body.new_password
-        ):
+        try:
+            changed = await service.change_password(
+                user, body.current_password, body.new_password
+            )
+        except InvalidPasswordException as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if not changed:
             raise HTTPException(status_code=400, detail="current password is wrong")
         return {"status": "ok"}
 
@@ -269,7 +287,14 @@ def build_auth_router(
             raise HTTPException(status_code=404, detail="setup not available") from None
         if not hmac.compare_digest(expected, body.token.strip()):
             raise HTTPException(status_code=400, detail="invalid setup token")
-        await service.create_first_admin(body.email, body.password)
+        try:
+            await service.create_first_admin(body.email, body.password)
+        except ValueError:
+            raise HTTPException(
+                status_code=404, detail="setup already completed"
+            ) from None
+        except InvalidPasswordException as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         token_file.unlink(missing_ok=True)
         return {"status": "ok"}
 

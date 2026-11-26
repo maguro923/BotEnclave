@@ -253,3 +253,149 @@ def test_publish_permissions_group_access(tmp_path: Path) -> None:
     assert base.stat().st_mode & 0o777 == 0o750
     assert script.stat().st_mode & 0o777 == 0o750  # executables stay executable
     assert plain.stat().st_mode & 0o777 == 0o640
+
+
+def test_publish_permissions_never_follows_symlinks(tmp_path: Path) -> None:
+    import os
+    import pwd
+    from types import SimpleNamespace
+
+    import botmgr.deploy as deploy_mod
+    from botmgr.deploy import _publish_permissions
+
+    outside = tmp_path / "interpreter"
+    outside.write_text("#!/bin/sh\n", encoding="utf-8")
+    outside.chmod(0o644)
+    base = tmp_path / "release"
+    (base / "bin").mkdir(parents=True)
+    (base / "bin" / "python").symlink_to(outside)  # like a venv's python
+    plain = base / "bot.py"
+    plain.write_text("x", encoding="utf-8")
+    plain.chmod(0o600)
+    real = pwd.getpwnam
+    deploy_mod.pwd = SimpleNamespace(  # type: ignore[attr-defined]
+        getpwnam=lambda name: SimpleNamespace(pw_gid=os.getgid())
+    )
+    try:
+        _publish_permissions([base], "alpha")
+    finally:
+        deploy_mod.pwd = real  # type: ignore[attr-defined]
+    # The link target (shared interpreter) must be untouched.
+    assert outside.stat().st_mode & 0o777 == 0o644
+    assert plain.stat().st_mode & 0o777 == 0o640
+
+
+def test_fetch_git_rewrites_credentialed_remote(tmp_path: Path) -> None:
+    import io
+
+    import botmgr.deploy as deploy_mod
+
+    calls: list[list[str]] = []
+
+    def fake_run_logged(argv: list[str], log: object, timeout: int, **kw: object) -> None:
+        calls.append(argv)
+
+    original = deploy_mod._run_logged
+    deploy_mod._run_logged = fake_run_logged  # type: ignore[assignment]
+    try:
+        deploy_mod.fetch_git(
+            "https://user:SECRET@github.com/owner/repo.git",
+            None,
+            tmp_path / "dest",
+            io.StringIO(),
+        )
+    finally:
+        deploy_mod._run_logged = original  # type: ignore[assignment]
+    set_url = [c for c in calls if "set-url" in c]
+    assert len(set_url) == 1
+    assert set_url[0][-1] == "https://github.com/owner/repo.git"
+    assert all("SECRET" not in part for c in set_url for part in c)
+
+
+def test_activate_failure_restores_previous_release(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+    tmp_path: Path,
+) -> None:
+    deploy, store, supervisor, root = service
+    zip1 = make_zip(tmp_path / "v1.zip", {"bot.py": BOT_PY})
+    first = deploy.deploy_zip("alpha", zip1, "v1.zip")
+    assert store.active_release("alpha").release_id == first.release_id  # type: ignore[union-attr]
+    supervisor.start("alpha")  # the bot is running when v2 arrives
+
+    def boom(bot: str) -> None:
+        raise RuntimeError("spawn exploded")
+
+    supervisor.start = boom  # type: ignore[method-assign]
+    zip2 = make_zip(tmp_path / "v2.zip", {"bot.py": BOT_PY + "# v2\n"})
+    with pytest.raises(DeployError, match="previous release restored"):
+        deploy.deploy_zip("alpha", zip2, "v2.zip")
+    active = store.active_release("alpha")
+    assert active is not None and active.release_id == first.release_id
+    current = root / "bots" / "alpha" / "current"
+    assert current.resolve().name == first.release_id
+
+
+def test_worker_timeout_kills_tree_and_cleans_up(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as json_mod
+    import subprocess as sp
+
+    import botmgr.deploy as deploy_mod
+
+    deploy, _store, _supervisor, root = service
+    sleeper = sp.Popen(["sleep", "60"], start_new_session=True)
+
+    class FakePopen:
+        pid = sleeper.pid
+
+        def __init__(self, argv: list[str], **kw: object) -> None:
+            self._job = json_mod.loads(Path(argv[-1]).read_text(encoding="utf-8"))
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            bot_dir = (
+                Path(str(self._job["root"])) / "bots" / str(self._job["bot"])
+            )
+            rid = str(self._job["release_id"])
+            (bot_dir / "releases" / rid).mkdir(parents=True, exist_ok=True)
+            (bot_dir / "venvs" / rid).mkdir(parents=True, exist_ok=True)
+            raise sp.TimeoutExpired(cmd="worker", timeout=timeout or 0)
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(deploy_mod.subprocess, "Popen", FakePopen)
+    zip_path = make_zip(tmp_path / "slow.zip", {"bot.py": BOT_PY})
+    try:
+        with pytest.raises(DeployError, match="timed out"):
+            deploy.deploy_zip("alpha", zip_path, "slow.zip")
+        assert sleeper.poll() is not None  # the whole tree was killed
+        bot_dir = root / "bots" / "alpha"
+        assert list((bot_dir / "releases").iterdir()) == []
+        assert list((bot_dir / "venvs").iterdir()) == []
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+
+
+def test_stale_job_files_are_swept_on_deploy(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+    tmp_path: Path,
+) -> None:
+    import os
+
+    deploy, _store, _supervisor, root = service
+    tmp_dir = root / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    stale = tmp_dir / "stale.json"
+    stale.write_text("{}", encoding="utf-8")
+    old = time.time() - 100_000
+    os.utime(stale, (old, old))
+    fresh = tmp_dir / "fresh.json"
+    fresh.write_text("{}", encoding="utf-8")
+    zip_path = make_zip(tmp_path / "ok.zip", {"bot.py": BOT_PY})
+    deploy.deploy_zip("alpha", zip_path, "ok.zip")
+    assert not stale.exists()  # a dead manager's job file (with credentials)
+    assert fresh.exists()

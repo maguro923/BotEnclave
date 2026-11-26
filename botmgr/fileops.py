@@ -134,10 +134,17 @@ def read_file(bot_root: Path, zone: str, rel: str) -> dict[str, object]:
         if size > MAX_READ_BYTES:
             raise FileOpError("too_large", "file exceeds the read limit")
         chunks: list[bytes] = []
+        total = 0
         while True:
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
+            total += len(chunk)
+            if total > MAX_READ_BYTES:
+                # The file grew after the size check (a running bot
+                # appending to it); the cap applies to what is read,
+                # not only to what fstat reported.
+                raise FileOpError("too_large", "file exceeds the read limit")
             chunks.append(chunk)
     finally:
         os.close(fd)

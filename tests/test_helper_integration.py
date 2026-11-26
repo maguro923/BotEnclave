@@ -413,3 +413,23 @@ def test_watchdog_reports_eater_over_rss_budget(helper: Helper) -> None:
         )
     finally:
         supervisor.stop(BOT_A)
+
+
+def test_panel_written_files_belong_to_the_bot(helper: Helper) -> None:
+    import pwd
+
+    helper.handle({"op": "create_user", "bot": BOT_A})
+    uid = pwd.getpwnam(f"bm-{BOT_A}").pw_uid
+    resp = helper.handle(
+        {"op": "file_write", "bot": BOT_A, "zone": "data",
+         "path": "owned.txt", "content": "x"}
+    )
+    assert resp["ok"] is True, resp
+    written = helper.root / "bots" / BOT_A / "data" / "owned.txt"
+    assert written.stat().st_uid == uid  # not root: the bot must read it
+    resp = helper.handle(
+        {"op": "file_mkdir", "bot": BOT_A, "zone": "data", "path": "subdir"}
+    )
+    assert resp["ok"] is True, resp
+    made = helper.root / "bots" / BOT_A / "data" / "subdir"
+    assert made.stat().st_uid == uid

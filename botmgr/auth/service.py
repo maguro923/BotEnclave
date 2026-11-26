@@ -13,6 +13,7 @@ and the CLI share exactly the same code path.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -51,6 +52,7 @@ class AuthService:
     def __init__(self, bundle: AuthBundle) -> None:
         self._bundle = bundle
         self._passwords = PasswordHelper()
+        self._setup_lock = asyncio.Lock()
 
     def _user_db(self, session: object) -> SQLAlchemyUserDatabase[User, int]:
         return SQLAlchemyUserDatabase(session, User)  # type: ignore[arg-type]
@@ -97,9 +99,16 @@ class AuthService:
             return user
 
     async def create_first_admin(self, email: str, password: str) -> User:
-        if await self.count_users() > 0:
-            raise ValueError("setup already completed")
-        return await self._create(email, password, is_admin=True, must_change=False)
+        # The count check and the create must be one atomic step: two
+        # concurrent setup requests would otherwise both pass the check
+        # (the Argon2 hashing in between makes the window wide) and each
+        # create an administrator.
+        async with self._setup_lock:
+            if await self.count_users() > 0:
+                raise ValueError("setup already completed")
+            return await self._create(
+                email, password, is_admin=True, must_change=False
+            )
 
     async def invite(self, email: str, is_admin: bool) -> tuple[User, str]:
         """Create an invited user; returns (user, temporary password). The
@@ -124,12 +133,19 @@ class AuthService:
             credentials = SimpleNamespace(username=email, password=password)
             authed = await manager.authenticate(credentials)  # type: ignore[arg-type]
         if authed is None:
-            await self._record_failure(email)
+            await self.record_failure(email)
             return None
-        await self._reset_failures(authed)
+        # The failure counter is reset by note_login_success once the
+        # whole login (including any second factor) has completed — not
+        # here, or second-factor failures could never accumulate.
         return authed
 
-    async def _record_failure(self, email: str) -> None:
+    async def note_login_success(self, user: User) -> None:
+        await self._reset_failures(user)
+
+    async def record_failure(self, email: str) -> None:
+        """Count one failed authentication attempt (bad password, or a
+        bad second factor after a good password) toward the lockout."""
         async with self._bundle.session_factory() as session:
             db = self._user_db(session)
             user = await db.get_by_email(email)
@@ -138,6 +154,10 @@ class AuthService:
             user.failed_login_count += 1
             if user.failed_login_count >= LOCKOUT_THRESHOLD:
                 user.locked_until = time.time() + LOCKOUT_SECONDS
+                # The lock consumes the accumulated failures: once it
+                # expires the budget starts fresh, instead of a single
+                # new mistake re-locking the account immediately.
+                user.failed_login_count = 0
             await session.commit()
 
     async def _reset_failures(self, user: User) -> None:

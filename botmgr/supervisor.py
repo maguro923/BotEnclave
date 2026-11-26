@@ -202,7 +202,7 @@ class Supervisor:
     def tick(self) -> None:
         """Poll for exits and fire due restarts, for every registered bot."""
         now = self._now()
-        for bot_id, entry in self._bots.items():
+        for bot_id, entry in list(self._bots.items()):
             if not entry.lock.acquire(blocking=False):
                 continue
             try:
@@ -216,7 +216,11 @@ class Supervisor:
             machine.state in (BotState.STARTING, BotState.RUNNING)
             and entry.identity is not None
         ):
-            exit_code = self._backend.poll_exit(entry.identity)
+            try:
+                exit_code = self._backend.poll_exit(entry.identity)
+            except Exception as exc:  # noqa: BLE001 - one bot's helper failure must not stop polling for the others
+                self.last_errors[bot_id] = exc
+                return
             if exit_code is not None:
                 entry.identity = None
                 machine.mark_exited(now, exit_code)

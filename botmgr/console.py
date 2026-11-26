@@ -7,7 +7,9 @@ The pipe-pane capture has two owners with opposite wishes (PLAN v6):
 
 This controller is the single place that reconciles them: private mode is
 reference-counted per bot, and capture is only (re)enabled when no private
-session is active.
+session is active. All helper side effects run under the lock: checking
+the private count and then toggling capture as separate steps would let
+the watchdog re-enable capture in between, inside a private session.
 """
 
 from __future__ import annotations
@@ -32,9 +34,8 @@ class CaptureController:
         with self._lock:
             count = self._private_holders.get(bot, 0) + 1
             self._private_holders[bot] = count
-            first = count == 1
-        if first:
-            self._client.set_capture(bot, False)
+            if count == 1:
+                self._client.set_capture(bot, False)
 
     def release_private(self, bot: str) -> None:
         """Unregister a private console session; resumes capture on the last."""
@@ -42,18 +43,16 @@ class CaptureController:
             count = self._private_holders.get(bot, 0) - 1
             if count <= 0:
                 self._private_holders.pop(bot, None)
-                last = True
+                self._client.set_capture(bot, True)
             else:
                 self._private_holders[bot] = count
-                last = False
-        if last:
-            self._client.set_capture(bot, True)
 
     def ensure_capture(self, bot: str) -> bool:
         """Watchdog entry point: re-attach capture unless private mode is
         active. Returns True if capture is on when the call returns."""
-        if self.private_active(bot):
-            return False
-        if not self._client.capture_state(bot):
-            self._client.set_capture(bot, True)
-        return True
+        with self._lock:
+            if self._private_holders.get(bot, 0) > 0:
+                return False
+            if not self._client.capture_state(bot):
+                self._client.set_capture(bot, True)
+            return True

@@ -163,3 +163,13 @@ def test_attention_can_be_started_manually() -> None:
     assert m.state is BotState.ATTENTION
     m.start(now=now + 1000.0)
     assert m.state is BotState.STARTING
+
+
+def test_request_stop_from_stopping_is_a_noop() -> None:
+    m = BotStateMachine()
+    m.start(now=0.0)
+    m.mark_running(now=0.0)
+    m.request_stop(now=1.0)
+    assert m.state is BotState.STOPPING
+    m.request_stop(now=2.0)  # retrying a failed stop must not raise
+    assert m.state is BotState.STOPPING

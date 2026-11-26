@@ -103,7 +103,10 @@ def parse_env_text(text: str) -> dict[str, str]:
     does: comments and blank lines are skipped, an ``export `` prefix is
     accepted, values may be single- or double-quoted."""
     result: dict[str, str] = {}
-    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+    # Split on \n only: splitlines() also breaks on \x0b, \x0c, \x85 and
+    # \u2028, which would corrupt values containing those characters and
+    # break the format_env_text round-trip.
+    for lineno, raw_line in enumerate(text.split("\n"), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue

@@ -27,7 +27,14 @@ def bot_unit_name(bot: str) -> str:
     return f"botenclave-bot-{bot}.service"
 
 
-def render_helper_entry(root: Path, package_dir: Path) -> str:
+def render_helper_entry(
+    root: Path, package_dir: Path, manager_group: str | None = None
+) -> str:
+    group_line = (
+        f"export BOTENCLAVE_MANAGER_GROUP={manager_group}\n"
+        if manager_group
+        else ""
+    )
     return (
         "#!/bin/sh\n"
         "# BotEnclave privileged helper entry point (root-owned).\n"
@@ -35,6 +42,7 @@ def render_helper_entry(root: Path, package_dir: Path) -> str:
         "# needs is fixed here, at install time.\n"
         f"export BOTENCLAVE_ROOT={root}\n"
         f"export BOTENCLAVE_PACKAGE_DIR={package_dir}\n"
+        f"{group_line}"
         f"export PYTHONPATH={package_dir.parent}\n"
         "exec /usr/bin/python3 -m botmgr.helperd\n"
     )

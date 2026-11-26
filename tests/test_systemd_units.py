@@ -43,3 +43,15 @@ def test_manager_unit_and_sudoers() -> None:
     assert entry.startswith("#!/bin/sh")
     assert "BOTENCLAVE_ROOT=/srv/botenclave" in entry
     assert "botmgr.helperd" in entry
+
+
+def test_helper_entry_exports_manager_group_when_given() -> None:
+    entry = systemd_units.render_helper_entry(
+        ROOT, PKG, manager_group="botenclave"
+    )
+    assert "export BOTENCLAVE_MANAGER_GROUP=botenclave\n" in entry
+
+
+def test_helper_entry_omits_manager_group_by_default() -> None:
+    entry = systemd_units.render_helper_entry(ROOT, PKG)
+    assert "BOTENCLAVE_MANAGER_GROUP" not in entry

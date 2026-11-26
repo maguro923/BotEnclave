@@ -309,3 +309,41 @@ def test_file_ops_dispatch_and_validation(
     )
     assert resp["ok"] is True
     assert ("file_rename", ("sleeper", "data", "a.txt", "b.txt")) in fake.calls
+
+
+def test_still_ours_filters_recycled_and_dead_pids() -> None:
+    import subprocess as sp
+
+    from botmgr import procident
+    from botmgr.helperd import _still_ours
+
+    proc = sp.Popen(["sleep", "30"])
+    try:
+        start = procident.start_time_of(proc.pid)
+        assert start is not None
+        assert _still_ours({proc.pid: start}) == {proc.pid}
+        assert _still_ours({proc.pid: start + 1}) == set()  # recycled PID
+        assert _still_ours({proc.pid + 100_000: 1}) == set()  # dead PID
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_start_bot_fifo_removed_when_new_session_raises(tmp_path: Path) -> None:
+    import subprocess as sp
+
+    from botmgr.helperd import SystemExecutor
+
+    data_dir = tmp_path / "bots" / "alpha" / "data"
+    data_dir.mkdir(parents=True)
+    executor = SystemExecutor(tmp_path)
+
+    def fake_tmux(bot: str, *args: str) -> sp.CompletedProcess[str]:
+        if args and args[0] == "new-session":
+            raise sp.TimeoutExpired(cmd="tmux", timeout=120)
+        return sp.CompletedProcess(args=["tmux"], returncode=0, stdout="", stderr="")
+
+    executor._tmux = fake_tmux  # type: ignore[method-assign]
+    with pytest.raises(sp.TimeoutExpired):
+        executor.start_bot("alpha", {"command": ["python3", "bot.py"], "env": {}})
+    assert list(data_dir.glob(".launch-*.fifo")) == []

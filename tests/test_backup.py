@@ -100,3 +100,28 @@ def test_restore_refuses_existing_and_tampering(tmp_path: Path) -> None:
                 dst.addfile(member)
     with pytest.raises(BackupError):
         restore_backup(tampered, tmp_path / "other")
+
+
+def test_restore_rejects_traversing_manifest_keys(tmp_path: Path) -> None:
+    # A crafted archive whose manifest points outside the target root
+    # must be rejected, even though its member names are all safe.
+    import io
+
+    archive = tmp_path / "crafted.tar.gz"
+    manifest = {
+        "format": 1,
+        "files": {"bots/../../evil.txt": "0" * 64},
+    }
+    with tarfile.open(archive, "w:gz") as tar:
+        payload = json.dumps(manifest).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+        data = b"pwned"
+        info = tarfile.TarInfo("evil.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "restored"
+    with pytest.raises(BackupError):
+        restore_backup(archive, dest)
+    assert not (tmp_path / "evil.txt").exists()

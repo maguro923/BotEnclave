@@ -15,10 +15,12 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,7 +35,10 @@ from botmgr.supervisor import Supervisor
 ENTRY_CANDIDATES = ("main.py", "bot.py", "app.py", "run.py")
 MAX_ZIP_MEMBERS = 10_000
 MAX_ZIP_TOTAL_BYTES = 200 * 1024 * 1024
-WORKER_TIMEOUT_SECONDS = 1200
+# Longer than the sum of the worker's stage budgets (clone 600s +
+# compile 60s + venv 300s + pip 900s), or a slow-but-legitimate deploy
+# would be killed mid-build.
+WORKER_TIMEOUT_SECONDS = 2000
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 
@@ -136,6 +141,17 @@ def fetch_git(url: str, branch: str | None, dest: Path, log: TextIO) -> None:
     # The deploy log must never carry URL credentials (PLAN 3.4).
     display = [_redact_url(part) if part == url else part for part in argv]
     _run_logged(argv, log, timeout=600, display=display)
+    redacted = _redact_url(url)
+    if redacted != url:
+        # git clone stores the full URL as remote.origin.url in
+        # .git/config, and the release tree becomes readable by the
+        # bot's group once published — the bot must never see the
+        # owner's credentials. Rewrite the stored remote without them.
+        _run_logged(
+            ["git", "-C", str(dest), "remote", "set-url", "origin", redacted],
+            log,
+            timeout=60,
+        )
 
 
 def fetch_zip(zip_path: Path, dest: Path, log: TextIO) -> None:
@@ -198,6 +214,11 @@ def _publish_permissions(paths: list[Path], bot: str) -> None:
             dir_path.chmod(0o750)
             for name in filenames:
                 file_path = dir_path / name
+                if file_path.is_symlink():
+                    # Never chown/chmod through a link: the venv's
+                    # bin/python points at the shared interpreter, and a
+                    # repository may link anywhere on the system.
+                    continue
                 os.chown(file_path, -1, gid)
                 mode = file_path.stat().st_mode
                 file_path.chmod(0o750 if mode & 0o111 else 0o640)
@@ -347,6 +368,18 @@ class DeployService:
         finally:
             lock.release()
 
+    def _sweep_stale_jobs(self, tmp_dir: Path) -> None:
+        """Remove job files left behind by a manager that died mid-deploy
+        (a git job file carries the credentialed URL in plaintext). A live
+        deploy's job file is never older than the worker timeout."""
+        cutoff = time.time() - WORKER_TIMEOUT_SECONDS
+        for path in tmp_dir.iterdir():
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
     def _deploy_locked(
         self, bot: str, job_spec: dict[str, object], source_ref: str, restart: bool
     ) -> DeployResult:
@@ -355,6 +388,7 @@ class DeployService:
         bot_dir = self._bot_dir(bot)
         tmp_dir = self._root / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
+        self._sweep_stale_jobs(tmp_dir)
         job: dict[str, object] = {
             **job_spec,
             "root": str(self._root),
@@ -368,15 +402,26 @@ class DeployService:
             json.dump(job, fh)
             job_path = Path(fh.name)
         result_path = Path(str(job["result_path"]))
+        # The worker runs in its own session so a timeout can kill the
+        # whole tree (clone/pip children included), not just the worker.
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "botmgr.deploy", str(job_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            proc = subprocess.run(
-                [sys.executable, "-m", "botmgr.deploy", str(job_path)],
-                capture_output=True,
-                text=True,
-                timeout=WORKER_TIMEOUT_SECONDS,
-                check=False,
-            )
+            _stdout, stderr = proc.communicate(timeout=WORKER_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            # A timed-out deploy is a failed deploy: drop its remains.
+            shutil.rmtree(bot_dir / "releases" / release_id, ignore_errors=True)
+            shutil.rmtree(bot_dir / "venvs" / release_id, ignore_errors=True)
             raise DeployError("deploy worker timed out") from None
         finally:
             job_path.unlink(missing_ok=True)
@@ -385,7 +430,7 @@ class DeployService:
             result = json.loads(result_path.read_text(encoding="utf-8"))
             result_path.unlink(missing_ok=True)
         if proc.returncode != 0 or not result.get("ok"):
-            error = str(result.get("error") or proc.stderr.strip() or "unknown")
+            error = str(result.get("error") or stderr.strip() or "unknown")
             # A failed release never becomes current; drop its remains.
             shutil.rmtree(bot_dir / "releases" / release_id, ignore_errors=True)
             shutil.rmtree(bot_dir / "venvs" / release_id, ignore_errors=True)
@@ -396,17 +441,10 @@ class DeployService:
         self._gc(bot)
         return DeployResult(release_id=release_id, entry=entry, state=state)
 
-    def _activate(
-        self, bot: str, release_id: str, entry: str, restart: bool
-    ) -> str:
+    def _point_at(self, bot: str, release_id: str, entry: str) -> None:
+        """Switch ``current``, the store's active record and the
+        supervisor's launch config to a release (bot already stopped)."""
         bot_dir = self._bot_dir(bot)
-        was_running = self._supervisor.state(bot).value not in (
-            "stopped",
-            "attention",
-            "secret-pending",
-        )
-        if was_running:
-            self._supervisor.stop(bot)
         tmp_link = bot_dir / f".current.tmp-{os.urandom(3).hex()}"
         os.symlink(f"releases/{release_id}", tmp_link)
         os.replace(tmp_link, bot_dir / "current")
@@ -421,8 +459,38 @@ class DeployService:
             env={"HOME": str(data_dir)},
         )
         self._supervisor.set_config(bot, config)
-        if was_running and restart:
-            self._supervisor.start(bot)
+
+    def _activate(
+        self, bot: str, release_id: str, entry: str, restart: bool
+    ) -> str:
+        bot_dir = self._bot_dir(bot)
+        was_running = self._supervisor.state(bot).value not in (
+            "stopped",
+            "attention",
+            "secret-pending",
+        )
+        previous = self._store.active_release(bot)
+        if was_running:
+            self._supervisor.stop(bot)
+        try:
+            self._point_at(bot, release_id, entry)
+            if was_running and restart:
+                self._supervisor.start(bot)
+        except Exception as exc:
+            if previous is None or previous.release_id == release_id:
+                raise DeployError(f"activation failed: {exc}") from exc
+            # DeployError's contract: a failed deploy leaves the previous
+            # release active. Point everything back and restart it.
+            try:
+                prev_entry = detect_entry(bot_dir / "releases" / previous.release_id)
+                self._point_at(bot, previous.release_id, prev_entry)
+                if was_running and restart:
+                    self._supervisor.start(bot)
+            except Exception:  # noqa: BLE001, S110 - report the original failure
+                pass
+            raise DeployError(
+                f"activation failed; previous release restored: {exc}"
+            ) from exc
         return self._supervisor.state(bot).value
 
     def rollback(self, bot: str, *, restart: bool = True) -> DeployResult:
