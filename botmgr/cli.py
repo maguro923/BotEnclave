@@ -40,9 +40,15 @@ class Runtime:
 
 
 def build_runtime(root: Path, package_dir: Path | None = None) -> Runtime:
+    from botmgr.envstore import SecretsService
+
     store = StateStore(root / "botmgr.db")
     client = HelperClient(direct_transport(root, package_dir))
-    supervisor = Supervisor(HelperBackend(client), store=store)
+    supervisor = Supervisor(
+        HelperBackend(client),
+        store=store,
+        env_provider=SecretsService(root, store).resolve,
+    )
     capture = CaptureController(client)
     report = reconcile(supervisor, store, client, capture)
     watchdog = Watchdog(supervisor, client, capture, root)

@@ -74,6 +74,29 @@ def _parse_value(value: str) -> str:
     return value
 
 
+_ENV_QUOTE_CHARS = frozenset(" \t\r\n#'\"")
+
+
+def format_env_text(env: Mapping[str, str]) -> str:
+    """Serialize env vars as .env text that parse_env_text reads back
+    exactly (the shared format for every secret backend, PLAN 3.3)."""
+    lines: list[str] = []
+    for key in sorted(env):
+        value = env[key]
+        if value and not any(ch in _ENV_QUOTE_CHARS for ch in value):
+            lines.append(f"{key}={value}")
+        else:
+            escaped = (
+                value.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t")
+            )
+            lines.append(f'{key}="{escaped}"')
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def parse_env_text(text: str) -> dict[str, str]:
     """Parse .env content (KEY=VALUE lines) the way python-dotenv generally
     does: comments and blank lines are skipped, an ``export `` prefix is
@@ -106,6 +129,11 @@ class LaunchConfig:
     env: dict[str, str]
     rlimit_nofile: int | None = None
     rlimit_nproc: int | None = None
+    # Spawn-time only flags (never persisted with secrets): the helper
+    # decrypts this bot's systemd-creds credential itself, and/or writes
+    # the merged env to data/.env for dotenv-style bots (PLAN 3.3 / 2.8).
+    use_credential: bool = False
+    dotenv_mode: bool = False
 
 
 def config_from_json(raw: bytes) -> LaunchConfig:

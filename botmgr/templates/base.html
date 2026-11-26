@@ -27,6 +27,17 @@
   #terminal { height: 380px; background: #000; border-radius: 6px; }
 </style>
 {% block head %}{% endblock %}
+<script>
+window.csrfToken = function () {
+  const m = document.cookie.match(/(?:^|; )botenclave_csrf=([^;]*)/);
+  return m ? decodeURIComponent(m[1]) : '';
+};
+window.apiFetch = function (url, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {}, { 'X-CSRF-Token': window.csrfToken() });
+  return fetch(url, Object.assign({}, opts, { headers }));
+};
+</script>
 </head>
 <body>
 {% if user is defined and user %}
@@ -42,7 +53,7 @@
 <script>
 document.getElementById('logout-link').addEventListener('click', async (e) => {
   e.preventDefault();
-  await fetch('/auth/logout', { method: 'POST' });
+  await window.apiFetch('/auth/logout', { method: 'POST' });
   location.href = '/login';
 });
 </script>

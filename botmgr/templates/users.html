@@ -38,7 +38,7 @@
 const result = document.getElementById('action-result');
 document.getElementById('invite-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const resp = await fetch('/admin/users/invite', {
+  const resp = await apiFetch('/admin/users/invite', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: document.getElementById('invite-email').value }),
   });
@@ -50,7 +50,7 @@ document.getElementById('invite-form').addEventListener('submit', async (e) => {
 });
 document.querySelectorAll('button[data-temp]').forEach((btn) => {
   btn.onclick = async () => {
-    const resp = await fetch('/admin/users/' + btn.dataset.temp + '/temp-password', { method: 'POST' });
+    const resp = await apiFetch('/admin/users/' + btn.dataset.temp + '/temp-password', { method: 'POST' });
     const data = await resp.json().catch(() => ({}));
     result.textContent = resp.ok
       ? 'New temporary password for ' + data.email + ': ' + data.temp_password + ' (shown once)'
@@ -59,13 +59,13 @@ document.querySelectorAll('button[data-temp]').forEach((btn) => {
 });
 document.querySelectorAll('button[data-disable]').forEach((btn) => {
   btn.onclick = async () => {
-    await fetch('/admin/users/' + btn.dataset.disable + '/disable', { method: 'POST' });
+    await apiFetch('/admin/users/' + btn.dataset.disable + '/disable', { method: 'POST' });
     location.reload();
   };
 });
 document.querySelectorAll('button[data-enable]').forEach((btn) => {
   btn.onclick = async () => {
-    await fetch('/admin/users/' + btn.dataset.enable + '/enable', { method: 'POST' });
+    await apiFetch('/admin/users/' + btn.dataset.enable + '/enable', { method: 'POST' });
     location.reload();
   };
 });
@@ -73,7 +73,7 @@ document.querySelectorAll('button[data-delete]').forEach((btn) => {
   btn.onclick = async () => {
     const mode = confirm('Transfer this user\'s bots to you? OK = transfer, Cancel = delete bots too')
       ? 'transfer' : 'delete';
-    const resp = await fetch('/admin/users/' + btn.dataset.delete + '?mode=' + mode, { method: 'DELETE' });
+    const resp = await apiFetch('/admin/users/' + btn.dataset.delete + '?mode=' + mode, { method: 'DELETE' });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
       result.textContent = data.detail || resp.status;

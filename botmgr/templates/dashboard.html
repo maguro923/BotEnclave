@@ -18,7 +18,7 @@
   {% for bot in bots %}
     <tr>
       <td><a href="/bots/{{ bot.id }}">{{ bot.id }}</a></td>
-      <td><span class="badge {{ bot.state }}" data-state-for="{{ bot.id }}">{{ bot.state }}</span></td>
+      <td><span class="badge {{ bot.state }}" data-state-for="{{ bot.id }}">{{ bot.state }}</span>{% if bot.dotenv_mode %} <span class="badge backoff" title="dotenv compatibility mode: secrets are also written as plaintext data/.env">dotenv</span>{% endif %}</td>
       <td>
         <button data-action="start" data-bot="{{ bot.id }}">Start</button>
         <button class="secondary" data-action="stop" data-bot="{{ bot.id }}">Stop</button>
@@ -33,7 +33,7 @@ document.getElementById('create-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const name = document.getElementById('bot-name').value.trim();
   const command = document.getElementById('bot-command').value.trim().split(/\s+/);
-  const resp = await fetch('/api/bots', {
+  const resp = await apiFetch('/api/bots', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, command }),
   });
@@ -49,11 +49,11 @@ document.querySelectorAll('button[data-action]').forEach((btn) => {
     const bot = btn.dataset.bot;
     if (btn.dataset.action === 'delete') {
       if (!confirm('Delete bot ' + bot + '?')) return;
-      await fetch('/api/bots/' + bot, { method: 'DELETE' });
+      await apiFetch('/api/bots/' + bot, { method: 'DELETE' });
       location.reload();
       return;
     }
-    await fetch('/api/bots/' + bot + '/' + btn.dataset.action, { method: 'POST' });
+    await apiFetch('/api/bots/' + bot + '/' + btn.dataset.action, { method: 'POST' });
   });
 });
 const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/overview');

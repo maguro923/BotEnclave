@@ -40,7 +40,7 @@
 <script>
 document.getElementById('pw-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const resp = await fetch('/auth/change-password', {
+  const resp = await apiFetch('/auth/change-password', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       current_password: document.getElementById('current').value,
@@ -54,7 +54,7 @@ document.getElementById('pw-form').addEventListener('submit', async (e) => {
 });
 const startBtn = document.getElementById('totp-start');
 if (startBtn) startBtn.onclick = async () => {
-  const resp = await fetch('/auth/totp/enroll', { method: 'POST' });
+  const resp = await apiFetch('/auth/totp/enroll', { method: 'POST' });
   const data = await resp.json();
   document.getElementById('totp-secret').textContent = data.secret;
   document.getElementById('totp-uri').textContent = data.otpauth_url;
@@ -63,7 +63,7 @@ if (startBtn) startBtn.onclick = async () => {
 const confirmForm = document.getElementById('totp-confirm-form');
 if (confirmForm) confirmForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const resp = await fetch('/auth/totp/confirm', {
+  const resp = await apiFetch('/auth/totp/confirm', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: document.getElementById('totp-confirm-code').value }),
   });
@@ -73,7 +73,7 @@ if (confirmForm) confirmForm.addEventListener('submit', async (e) => {
 const disableForm = document.getElementById('totp-disable-form');
 if (disableForm) disableForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const resp = await fetch('/auth/totp/disable', {
+  const resp = await apiFetch('/auth/totp/disable', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: document.getElementById('totp-disable-code').value }),
   });

@@ -24,8 +24,8 @@ import time
 from pathlib import Path
 from typing import Protocol
 
-from botmgr import procident
-from botmgr.launcher import config_from_json
+from botmgr import fileops, procident
+from botmgr.launcher import config_from_json, format_env_text, parse_env_text
 from botmgr.procident import ProcessIdentity
 
 DEFAULT_ROOT = Path("/srv/botenclave")
@@ -99,6 +99,13 @@ class Executor(Protocol):
     def console_send(self, bot: str, text: str, enter: bool) -> None: ...
     def console_resize(self, bot: str, cols: int, rows: int) -> None: ...
     def console_clear_history(self, bot: str) -> None: ...
+    def ensure_layout(self, bot: str) -> None: ...
+    def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]: ...
+    def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]: ...
+    def file_write(self, bot: str, zone: str, rel: str, content: str) -> None: ...
+    def file_mkdir(self, bot: str, zone: str, rel: str) -> None: ...
+    def file_delete(self, bot: str, zone: str, rel: str) -> None: ...
+    def file_rename(self, bot: str, zone: str, src: str, dst: str) -> None: ...
 
 
 @dataclasses.dataclass
@@ -195,6 +202,20 @@ class Helper:
                 raise RequestError("bad_request", "enter must be a boolean")
             self.executor.console_send(bot, text, enter)
             return {"sent": len(text)}
+        if op == "ensure_layout":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            self.executor.ensure_layout(bot)
+            return {"ready": True}
+        if op in (
+            "file_list",
+            "file_read",
+            "file_write",
+            "file_mkdir",
+            "file_delete",
+            "file_rename",
+        ):
+            return self._dispatch_file_op(op, request)
         if op == "console_clear_history":
             _reject_unknown_keys(request, {"op", "bot"})
             bot = validate_bot_name(request.get("bot"))
@@ -212,6 +233,47 @@ class Helper:
             self.executor.console_resize(bot, cols, rows)
             return {"cols": cols, "rows": rows}
         raise RequestError("bad_request", f"unknown op: {op!r}")
+
+    def _dispatch_file_op(
+        self, op: str, request: dict[str, object]
+    ) -> dict[str, object]:
+        allowed = {"op", "bot", "zone", "path"}
+        if op == "file_write":
+            allowed.add("content")
+        if op == "file_rename":
+            allowed.add("to")
+        _reject_unknown_keys(request, allowed)
+        bot = validate_bot_name(request.get("bot"))
+        zone = request.get("zone")
+        if zone not in ("data", "logs", "releases"):
+            raise RequestError("bad_request", "invalid zone")
+        rel = request.get("path")
+        if not isinstance(rel, str):
+            raise RequestError("bad_request", "path must be a string")
+        try:
+            if op == "file_list":
+                return {"entries": self.executor.file_list(bot, zone, rel)}
+            if op == "file_read":
+                return self.executor.file_read(bot, zone, rel)
+            if op == "file_write":
+                content = request.get("content")
+                if not isinstance(content, str):
+                    raise RequestError("bad_request", "content must be a string")
+                self.executor.file_write(bot, zone, rel, content)
+                return {"written": len(content)}
+            if op == "file_mkdir":
+                self.executor.file_mkdir(bot, zone, rel)
+                return {"created": rel}
+            if op == "file_delete":
+                self.executor.file_delete(bot, zone, rel)
+                return {"deleted": rel}
+            to = request.get("to")
+            if not isinstance(to, str):
+                raise RequestError("bad_request", "to must be a string")
+            self.executor.file_rename(bot, zone, rel, to)
+            return {"renamed": to}
+        except fileops.FileOpError as exc:
+            raise RequestError(exc.code, exc.message) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +333,7 @@ class SystemExecutor:
             path.mkdir(parents=True, exist_ok=True)
             _run(["chown", f"{user}:{group}", str(path)])
             path.chmod(mode)
+        self.ensure_layout(bot)
         # The bot folder itself belongs to the bot user (PLAN section 2.4):
         # without that, the bot cannot even traverse into its own tree.
         _run(["chown", f"{user}:{group}", str(bot_dir)])
@@ -278,6 +341,20 @@ class SystemExecutor:
         # Bot users must be able to traverse the shared parent to reach
         # their own folder, without being able to list the others.
         (self.root / "bots").chmod(0o711)
+
+    def ensure_layout(self, bot: str) -> None:
+        """Create the manager-owned release areas (PLAN section 2.4):
+        releases/ and venvs/ belong to the manager (the owner of the
+        deployment root) with the bot's group allowed to read/execute, so
+        the bot can run its code but never rewrite a release."""
+        user = username_for(bot)
+        manager_uid = os.stat(self.root).st_uid
+        bot_dir = self.root / "bots" / bot
+        for sub in ("releases", "venvs"):
+            path = bot_dir / sub
+            path.mkdir(parents=True, exist_ok=True)
+            _run(["chown", f"{manager_uid}:{user}", str(path)])
+            path.chmod(0o750)
 
     def delete_user(self, bot: str) -> None:
         user = username_for(bot)
@@ -348,9 +425,49 @@ class SystemExecutor:
         except ValueError:
             return None
 
+    def _credential_env(self, bot: str) -> dict[str, str]:
+        """Decrypt this bot's systemd-creds credential (root only) and
+        parse its .env content. The credential name is bound to the bot,
+        so another bot's file cannot be substituted (PLAN 3.3)."""
+        cred = self.root / "secrets" / f"{bot}.cred"
+        if not cred.exists():
+            raise RuntimeError(f"no credential stored for bot {bot}")
+        proc = _run(
+            [
+                "systemd-creds",
+                "decrypt",
+                f"--name=botmgr-{bot}",
+                str(cred),
+                "-",
+            ]
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"systemd-creds decrypt failed: {proc.stderr.strip()}"
+            )
+        return parse_env_text(proc.stdout)
+
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity:
         user = username_for(bot)
         data_dir = self.root / "bots" / bot / "data"
+        launch = dict(launch)
+        env_obj = launch.get("env")
+        env: dict[str, str] = dict(env_obj) if isinstance(env_obj, dict) else {}
+        if launch.pop("use_credential", False):
+            # Secret values win over the plain launch env and never pass
+            # through the manager process.
+            env.update(self._credential_env(bot))
+        if launch.pop("dotenv_mode", False):
+            # dotenv compatibility mode (PLAN 2.8): the merged env also
+            # lands as data/.env, bot-owned 0600. Plaintext on disk is the
+            # documented weakness of this mode.
+            dotenv = data_dir / ".env"
+            tmp = data_dir / f".env.tmp-{os.urandom(4).hex()}"
+            tmp.write_text(format_env_text(env), encoding="utf-8")
+            _run(["chown", f"{user}:{user}", str(tmp)])
+            tmp.chmod(0o600)
+            os.replace(tmp, dotenv)
+        launch["env"] = env
         fifo = data_dir / f".launch-{os.urandom(6).hex()}.fifo"
         os.mkfifo(fifo, 0o600)
         _run(["chown", f"{user}:{user}", str(fifo)])
@@ -453,6 +570,31 @@ class SystemExecutor:
         proc = self._tmux(bot, "clear-history", "-t", "main")
         if proc.returncode != 0:
             raise RuntimeError(f"clear-history failed: {proc.stderr.strip()}")
+
+    # -- file management (PLAN 2.8; validation lives in botmgr.fileops) ------
+    def _bot_root(self, bot: str) -> Path:
+        return self.root / "bots" / bot
+
+    def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]:
+        return [
+            entry.to_json()
+            for entry in fileops.list_dir(self._bot_root(bot), zone, rel)
+        ]
+
+    def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]:
+        return fileops.read_file(self._bot_root(bot), zone, rel)
+
+    def file_write(self, bot: str, zone: str, rel: str, content: str) -> None:
+        fileops.write_file(self._bot_root(bot), zone, rel, content)
+
+    def file_mkdir(self, bot: str, zone: str, rel: str) -> None:
+        fileops.make_dir(self._bot_root(bot), zone, rel)
+
+    def file_delete(self, bot: str, zone: str, rel: str) -> None:
+        fileops.delete_path(self._bot_root(bot), zone, rel)
+
+    def file_rename(self, bot: str, zone: str, src: str, dst: str) -> None:
+        fileops.rename_path(self._bot_root(bot), zone, src, dst)
 
     def stop_bot(self, bot: str, identity: ProcessIdentity, grace: float) -> int:
         exit_code = self._pane_exit_code(bot)

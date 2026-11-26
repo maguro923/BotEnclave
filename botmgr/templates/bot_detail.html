@@ -10,7 +10,93 @@
   <button id="start-btn">Start</button>
   <button class="secondary" id="stop-btn">Stop</button>
   <button class="danger" id="delete-btn">Delete</button>
+  <span id="action-result" style="color: #d29922;"></span>
 </p>
+
+<div class="card">
+  <h2>Deploy</h2>
+  <form id="git-form">
+    <input type="text" id="git-url" placeholder="Git URL (https:// or git@…)" style="width: 55%;">
+    <input type="text" id="git-branch" placeholder="Branch (optional)" style="width: 20%;">
+    <button type="submit">Deploy from Git</button>
+  </form>
+  <form id="zip-form" style="margin-top: .5rem;">
+    <input type="file" id="zip-file" accept=".zip">
+    <button type="submit">Deploy from zip</button>
+  </form>
+  <p id="deploy-result" style="color: #d29922;"></p>
+  <table>
+    <thead><tr><th>Release</th><th>Source</th><th>Active</th><th></th></tr></thead>
+    <tbody id="release-rows"></tbody>
+  </table>
+  <p><button class="secondary" id="rollback-btn">Roll back to previous release</button></p>
+  <pre class="log" id="deploy-log" style="height: 160px;" hidden></pre>
+</div>
+
+<div class="card">
+  <h2>Environment variables</h2>
+  <p style="color: #8b949e;">Saved values are never shown again. Saving replaces the whole
+  set. Backend: <strong id="env-backend-label"></strong></p>
+  <p>Current keys: <span id="env-keys"></span></p>
+  <form id="env-form">
+    <p><textarea id="env-text" rows="6" style="width: 100%;" placeholder="DISCORD_TOKEN=...&#10;OTHER_KEY=value"></textarea></p>
+    <label>Backend
+      <select id="env-backend">
+        <option value="systemd-creds">systemd-creds (standard)</option>
+        <option value="fernet">Fernet (non-systemd fallback)</option>
+        <option value="memory">Memory only (re-enter after manager restart)</option>
+      </select>
+    </label>
+    <button type="submit">Save environment</button>
+    <span id="env-result" style="color: #d29922;"></span>
+  </form>
+  <p>
+    <label><input type="checkbox" id="dotenv-mode"> dotenv compatibility mode: also write
+    the values as a plaintext <code>data/.env</code> at start</label>
+  </p>
+  <p class="notice" id="dotenv-warning" hidden>dotenv mode keeps secrets as plaintext on
+  disk (and in backups). Use it only for bots that cannot read environment variables.</p>
+</div>
+
+<div class="card">
+  <h2>Git webhook</h2>
+  <p>Status: <span id="webhook-status"></span></p>
+  <button class="secondary" id="webhook-rotate">Generate / rotate webhook secret</button>
+  <p id="webhook-secret" style="word-break: break-all;"></p>
+  <p style="color: #8b949e;">POST to <code>/webhooks/git/{{ bot }}</code> with headers
+  <code>X-BotEnclave-Timestamp</code> and <code>X-BotEnclave-Signature</code>
+  (HMAC-SHA256 of <code>timestamp + "." + body</code>) and a JSON body
+  <code>{"repo": "&lt;registered git URL&gt;", "branch": "&lt;branch&gt;"}</code>.</p>
+</div>
+
+<div class="card">
+  <h2>Files</h2>
+  <p>
+    Zone
+    <select id="file-zone">
+      <option value="data">data (editable)</option>
+      <option value="logs">logs (read-only)</option>
+      <option value="releases">releases (read-only)</option>
+    </select>
+    Path: <span id="file-path"></span>
+    <button class="secondary" id="file-up">Up</button>
+    <button class="secondary" id="file-newdir">New folder</button>
+    <button class="secondary" id="file-newfile">New file</button>
+  </p>
+  <table>
+    <thead><tr><th>Name</th><th>Kind</th><th>Size</th><th></th></tr></thead>
+    <tbody id="file-rows"></tbody>
+  </table>
+  <div id="file-editor" hidden>
+    <p>Editing <code id="editor-path"></code></p>
+    <textarea id="editor-text" rows="14" style="width: 100%;"></textarea>
+    <p>
+      <button id="editor-save">Save</button>
+      <button class="secondary" id="editor-close">Close</button>
+      <span id="editor-result" style="color: #d29922;"></span>
+    </p>
+  </div>
+</div>
 
 <div class="card">
   <h2>Console</h2>
@@ -27,17 +113,233 @@
 
 <script>
 const botId = {{ bot|tojson }};
-const api = (path, method) => fetch(path, { method });
-document.getElementById('start-btn').onclick = () => api('/api/bots/' + botId + '/start', 'POST');
-document.getElementById('stop-btn').onclick = () => api('/api/bots/' + botId + '/stop', 'POST');
-document.getElementById('delete-btn').onclick = async () => {
+const $ = (id) => document.getElementById(id);
+const showResult = (el, text) => { el.textContent = text; };
+
+$('start-btn').onclick = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/start', { method: 'POST' });
+  const data = await resp.json().catch(() => ({}));
+  $('state-badge').textContent = data.state || '?';
+  $('state-badge').className = 'badge ' + (data.state || '');
+  if (data.state === 'secret-pending') {
+    showResult($('action-result'), 'Secrets are not loaded (memory backend). Re-save the environment below, then start again.');
+  }
+};
+$('stop-btn').onclick = () => apiFetch('/api/bots/' + botId + '/stop', { method: 'POST' });
+$('delete-btn').onclick = async () => {
   if (!confirm('Delete bot ' + botId + '?')) return;
-  await api('/api/bots/' + botId, 'DELETE');
+  await apiFetch('/api/bots/' + botId, { method: 'DELETE' });
   location.href = '/';
 };
 
+// -- deploy ----------------------------------------------------------------
+async function loadReleases() {
+  const resp = await fetch('/api/bots/' + botId + '/releases');
+  const rows = await resp.json();
+  const tbody = $('release-rows');
+  tbody.textContent = '';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const td = (text) => { const c = document.createElement('td'); c.textContent = text; return c; };
+    tr.appendChild(td(r.release_id));
+    tr.appendChild(td(r.source_ref));
+    tr.appendChild(td(r.active ? 'yes' : ''));
+    const cell = document.createElement('td');
+    const btn = document.createElement('button');
+    btn.className = 'secondary';
+    btn.textContent = 'Deploy log';
+    btn.onclick = async () => {
+      const resp2 = await fetch('/api/bots/' + botId + '/releases/' + r.release_id + '/log');
+      const data = await resp2.json();
+      $('deploy-log').hidden = false;
+      $('deploy-log').textContent = data.log || '(empty)';
+    };
+    cell.appendChild(btn);
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  }
+}
+$('git-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showResult($('deploy-result'), 'Deploying…');
+  const resp = await apiFetch('/api/bots/' + botId + '/deploy/git', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: $('git-url').value.trim(), branch: $('git-branch').value.trim() || null }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  showResult($('deploy-result'), resp.ok ? 'Deployed release ' + data.release_id : 'Failed: ' + (data.detail || resp.status));
+  loadReleases();
+});
+$('zip-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = $('zip-file').files[0];
+  if (!file) return;
+  showResult($('deploy-result'), 'Uploading…');
+  const form = new FormData();
+  form.append('file', file);
+  const resp = await apiFetch('/api/bots/' + botId + '/deploy/upload', { method: 'POST', body: form });
+  const data = await resp.json().catch(() => ({}));
+  showResult($('deploy-result'), resp.ok ? 'Deployed release ' + data.release_id : 'Failed: ' + (data.detail || resp.status));
+  loadReleases();
+});
+$('rollback-btn').onclick = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/rollback', { method: 'POST' });
+  const data = await resp.json().catch(() => ({}));
+  showResult($('deploy-result'), resp.ok ? 'Rolled back to ' + data.release_id : 'Failed: ' + (data.detail || resp.status));
+  loadReleases();
+};
+loadReleases();
+
+// -- environment -------------------------------------------------------------
+async function loadEnv() {
+  const resp = await fetch('/api/bots/' + botId + '/env');
+  const data = await resp.json();
+  $('env-backend-label').textContent = data.backend;
+  $('env-backend').value = data.backend;
+  $('env-keys').textContent = data.keys.length ? data.keys.join(', ') : '(none)';
+  $('dotenv-mode').checked = !!data.dotenv_mode;
+  $('dotenv-warning').hidden = !data.dotenv_mode;
+}
+$('env-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const env = {};
+  for (const line of $('env-text').value.split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const i = t.indexOf('=');
+    if (i < 0) { showResult($('env-result'), 'Bad line: ' + t); return; }
+    env[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+  const resp = await apiFetch('/api/bots/' + botId + '/env', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ env, backend: $('env-backend').value }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { showResult($('env-result'), 'Failed: ' + (data.detail || resp.status)); return; }
+  let msg = 'Saved.';
+  if (data.bot_identity) msg += ' Discord bot: ' + data.bot_identity.username + ' (' + data.bot_identity.id + ').';
+  if (data.warnings && data.warnings.length) msg += ' Warnings: ' + data.warnings.join(' / ');
+  showResult($('env-result'), msg);
+  $('env-text').value = '';
+  loadEnv();
+});
+$('dotenv-mode').onchange = async () => {
+  await apiFetch('/api/bots/' + botId + '/dotenv-mode', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: $('dotenv-mode').checked }),
+  });
+  $('dotenv-warning').hidden = !$('dotenv-mode').checked;
+};
+loadEnv();
+
+// -- webhook -------------------------------------------------------------------
+async function loadWebhook() {
+  const resp = await fetch('/api/bots/' + botId + '/webhook');
+  const data = await resp.json();
+  $('webhook-status').textContent = data.configured ? 'secret configured' : 'no secret yet';
+}
+$('webhook-rotate').onclick = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/webhook-secret', { method: 'POST' });
+  const data = await resp.json();
+  $('webhook-secret').textContent = 'New secret (shown once): ' + data.secret;
+  loadWebhook();
+};
+loadWebhook();
+
+// -- files -----------------------------------------------------------------------
+let filePath = '';
+async function loadFiles() {
+  const zone = $('file-zone').value;
+  $('file-path').textContent = '/' + filePath;
+  const resp = await fetch('/api/bots/' + botId + '/files?zone=' + zone + '&path=' + encodeURIComponent(filePath));
+  const tbody = $('file-rows');
+  tbody.textContent = '';
+  if (!resp.ok) return;
+  const data = await resp.json();
+  for (const entry of data.entries) {
+    const tr = document.createElement('tr');
+    const nameCell = document.createElement('td');
+    if (entry.kind === 'dir') {
+      const a = document.createElement('a');
+      a.href = '#';
+      a.textContent = entry.name + '/';
+      a.onclick = (e) => { e.preventDefault(); filePath = filePath ? filePath + '/' + entry.name : entry.name; loadFiles(); };
+      nameCell.appendChild(a);
+    } else {
+      nameCell.textContent = entry.name;
+    }
+    const kindCell = document.createElement('td'); kindCell.textContent = entry.kind;
+    const sizeCell = document.createElement('td'); sizeCell.textContent = entry.size == null ? '' : entry.size;
+    const actCell = document.createElement('td');
+    if (entry.kind === 'file') {
+      const open = document.createElement('button');
+      open.className = 'secondary'; open.textContent = 'Open';
+      open.onclick = () => openFile(entry.name);
+      actCell.appendChild(open);
+      const dl = document.createElement('a');
+      dl.href = '/api/bots/' + botId + '/files/download?zone=' + zone + '&path=' + encodeURIComponent((filePath ? filePath + '/' : '') + entry.name);
+      dl.textContent = 'Download';
+      actCell.appendChild(document.createTextNode(' '));
+      actCell.appendChild(dl);
+    }
+    if (zone === 'data' && entry.kind !== 'symlink') {
+      const del = document.createElement('button');
+      del.className = 'danger'; del.textContent = 'Delete';
+      del.onclick = async () => {
+        if (!confirm('Delete ' + entry.name + '?')) return;
+        await apiFetch('/api/bots/' + botId + '/files?zone=data&path=' + encodeURIComponent((filePath ? filePath + '/' : '') + entry.name), { method: 'DELETE' });
+        loadFiles();
+      };
+      actCell.appendChild(document.createTextNode(' '));
+      actCell.appendChild(del);
+    }
+    tr.appendChild(nameCell); tr.appendChild(kindCell); tr.appendChild(sizeCell); tr.appendChild(actCell);
+    tbody.appendChild(tr);
+  }
+}
+async function openFile(name) {
+  const zone = $('file-zone').value;
+  const rel = (filePath ? filePath + '/' : '') + name;
+  const resp = await fetch('/api/bots/' + botId + '/files/content?zone=' + zone + '&path=' + encodeURIComponent(rel));
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || data.kind !== 'text') { alert('Cannot edit this file (binary or error). Use Download.'); return; }
+  $('editor-path').textContent = rel;
+  $('editor-text').value = data.content;
+  $('editor-save').disabled = zone !== 'data';
+  $('file-editor').hidden = false;
+}
+$('editor-save').onclick = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/files/content', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ zone: 'data', path: $('editor-path').textContent, content: $('editor-text').value }),
+  });
+  showResult($('editor-result'), resp.ok ? 'Saved.' : 'Failed: ' + resp.status);
+};
+$('editor-close').onclick = () => { $('file-editor').hidden = true; };
+$('file-zone').onchange = () => { filePath = ''; $('file-editor').hidden = true; loadFiles(); };
+$('file-up').onclick = () => { filePath = filePath.split('/').slice(0, -1).join('/'); loadFiles(); };
+$('file-newdir').onclick = async () => {
+  const name = prompt('Folder name');
+  if (!name) return;
+  await apiFetch('/api/bots/' + botId + '/files/mkdir', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ zone: 'data', path: (filePath ? filePath + '/' : '') + name }),
+  });
+  loadFiles();
+};
+$('file-newfile').onclick = async () => {
+  const name = prompt('File name');
+  if (!name) return;
+  await apiFetch('/api/bots/' + botId + '/files/content', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ zone: 'data', path: (filePath ? filePath + '/' : '') + name, content: '' }),
+  });
+  loadFiles();
+};
+loadFiles();
+
+// -- console + log ---------------------------------------------------------------
 const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-// Live log
 const logEl = document.getElementById('log');
 const logWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/log');
 logWs.onmessage = (event) => {
@@ -48,7 +350,6 @@ logWs.onmessage = (event) => {
   while (logEl.childNodes.length > 2000) logEl.removeChild(logEl.firstChild);
   logEl.scrollTop = logEl.scrollHeight;
 };
-// Interactive console (xterm.js, vendored)
 const term = new Terminal({ convertEol: false, fontSize: 13 });
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);

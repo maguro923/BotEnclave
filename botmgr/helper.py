@@ -66,6 +66,10 @@ class HelperClient:
             rlimits["nproc"] = config.rlimit_nproc
         if rlimits:
             launch["rlimits"] = rlimits
+        if config.use_credential:
+            launch["use_credential"] = True
+        if config.dotenv_mode:
+            launch["dotenv_mode"] = True
         result = self._call({"op": "start_bot", "bot": bot, "launch": launch})
         identity = result["identity"]
         if not isinstance(identity, dict):
@@ -114,6 +118,53 @@ class HelperClient:
 
     def console_clear_history(self, bot: str) -> None:
         self._call({"op": "console_clear_history", "bot": bot})
+
+    def ensure_layout(self, bot: str) -> None:
+        self._call({"op": "ensure_layout", "bot": bot})
+
+    def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, Any]]:
+        result = self._call(
+            {"op": "file_list", "bot": bot, "zone": zone, "path": rel}
+        )
+        entries = result["entries"]
+        return entries if isinstance(entries, list) else []
+
+    def file_read(self, bot: str, zone: str, rel: str) -> dict[str, Any]:
+        return self._call(
+            {"op": "file_read", "bot": bot, "zone": zone, "path": rel}
+        )
+
+    def file_write(self, bot: str, zone: str, rel: str, content: str) -> None:
+        self._call(
+            {
+                "op": "file_write",
+                "bot": bot,
+                "zone": zone,
+                "path": rel,
+                "content": content,
+            }
+        )
+
+    def file_mkdir(self, bot: str, zone: str, rel: str) -> None:
+        self._call(
+            {"op": "file_mkdir", "bot": bot, "zone": zone, "path": rel}
+        )
+
+    def file_delete(self, bot: str, zone: str, rel: str) -> None:
+        self._call(
+            {"op": "file_delete", "bot": bot, "zone": zone, "path": rel}
+        )
+
+    def file_rename(self, bot: str, zone: str, src: str, dst: str) -> None:
+        self._call(
+            {
+                "op": "file_rename",
+                "bot": bot,
+                "zone": zone,
+                "path": src,
+                "to": dst,
+            }
+        )
 
     def bot_status(
         self, bot: str, identity: ProcessIdentity

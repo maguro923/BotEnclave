@@ -53,6 +53,29 @@ class FakeExecutor:
     def console_clear_history(self, bot: str) -> None:
         self.calls.append(("console_clear_history", (bot,)))
 
+    def ensure_layout(self, bot: str) -> None:
+        self.calls.append(("ensure_layout", (bot,)))
+
+    def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]:
+        self.calls.append(("file_list", (bot, zone, rel)))
+        return [{"name": "a.txt", "kind": "file", "size": 3}]
+
+    def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]:
+        self.calls.append(("file_read", (bot, zone, rel)))
+        return {"kind": "text", "content": "abc", "size": 3}
+
+    def file_write(self, bot: str, zone: str, rel: str, content: str) -> None:
+        self.calls.append(("file_write", (bot, zone, rel, content)))
+
+    def file_mkdir(self, bot: str, zone: str, rel: str) -> None:
+        self.calls.append(("file_mkdir", (bot, zone, rel)))
+
+    def file_delete(self, bot: str, zone: str, rel: str) -> None:
+        self.calls.append(("file_delete", (bot, zone, rel)))
+
+    def file_rename(self, bot: str, zone: str, src: str, dst: str) -> None:
+        self.calls.append(("file_rename", (bot, zone, src, dst)))
+
 
 @pytest.fixture()
 def helper(tmp_path: Path) -> tuple[Helper, FakeExecutor]:
@@ -240,3 +263,45 @@ def test_console_snapshot(helper: tuple[Helper, FakeExecutor]) -> None:
     h, _ex = helper
     resp = h.handle({"op": "console_snapshot", "bot": "alpha"})
     assert resp == {"ok": True, "result": {"text": "screen text"}}
+
+
+def test_ensure_layout_dispatch(
+    helper: tuple[Helper, FakeExecutor],
+) -> None:
+    h, fake = helper
+    resp = h.handle({"op": "ensure_layout", "bot": "sleeper"})
+    assert resp["ok"] is True
+    assert ("ensure_layout", ("sleeper",)) in fake.calls
+
+
+def test_file_ops_dispatch_and_validation(
+    helper: tuple[Helper, FakeExecutor],
+) -> None:
+    h, fake = helper
+    resp = h.handle(
+        {"op": "file_list", "bot": "sleeper", "zone": "data", "path": ""}
+    )
+    assert resp["ok"] is True
+    assert resp["result"]["entries"][0]["name"] == "a.txt"
+    resp = h.handle(
+        {"op": "file_write", "bot": "sleeper", "zone": "data",
+         "path": "a.txt", "content": "hello"}
+    )
+    assert resp["ok"] is True
+    assert ("file_write", ("sleeper", "data", "a.txt", "hello")) in fake.calls
+    # Bad zone and unknown fields are refused before the executor runs.
+    resp = h.handle(
+        {"op": "file_list", "bot": "sleeper", "zone": "venvs", "path": ""}
+    )
+    assert resp["ok"] is False
+    resp = h.handle(
+        {"op": "file_list", "bot": "sleeper", "zone": "data", "path": "",
+         "extra": 1}
+    )
+    assert resp["ok"] is False
+    resp = h.handle(
+        {"op": "file_rename", "bot": "sleeper", "zone": "data",
+         "path": "a.txt", "to": "b.txt"}
+    )
+    assert resp["ok"] is True
+    assert ("file_rename", ("sleeper", "data", "a.txt", "b.txt")) in fake.calls

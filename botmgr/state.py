@@ -80,6 +80,19 @@ class BotStateMachine:
         self._started_at = now
         self._retry_at = None
 
+    def mark_secret_pending(self, now: float) -> None:
+        """The bot cannot start because its secrets are not available
+        (memory-only backend after a manager restart, PLAN section 2.3).
+        Not a failure: no crash accounting, and a later start is allowed
+        once the owner re-enters the values."""
+        if self._state not in _STARTABLE and self._state is not BotState.STARTING:
+            raise InvalidTransition(
+                f"cannot mark secret-pending from {self._state.value}"
+            )
+        self._state = BotState.SECRET_PENDING
+        self._retry_at = None
+        self._started_at = None
+
     def mark_running(self, now: float) -> None:
         if self._state is not BotState.STARTING:
             raise InvalidTransition(f"cannot mark running from {self._state.value}")

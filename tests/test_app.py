@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from botmgr import fileops
 from botmgr.app import AppConfig, assert_bot_routes_guarded, create_app
 from botmgr.procident import current_boot_id
 
@@ -26,13 +27,18 @@ GUEST_PASSWORD = "guest-password-1"
 
 
 class FakeHelper:
-    def __init__(self) -> None:
+    def __init__(self, root: Path) -> None:
+        self.root = root
         self.users: set[str] = set()
         self.running: dict[str, dict[str, Any]] = {}
         self.capture: dict[str, bool] = {}
         self.cleared: list[str] = []
         self.sent: list[tuple[str, str, bool]] = []
+        self.launches: dict[str, dict[str, Any]] = {}
         self._pid = 10000
+
+    def _bot_root(self, bot: str) -> Path:
+        return self.root / "bots" / bot
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request["op"]
@@ -40,12 +46,19 @@ class FakeHelper:
         result: dict[str, Any] = {}
         if op == "create_user":
             self.users.add(bot)
+            for sub in ("data", "logs", "releases", "venvs"):
+                (self._bot_root(bot) / sub).mkdir(parents=True, exist_ok=True)
             result = {"user": f"bm-{bot}"}
         elif op == "delete_user":
             self.users.discard(bot)
             self.running.pop(bot, None)
             result = {"user": f"bm-{bot}"}
+        elif op == "ensure_layout":
+            for sub in ("releases", "venvs"):
+                (self._bot_root(bot) / sub).mkdir(parents=True, exist_ok=True)
+            result = {"ready": True}
         elif op == "start_bot":
+            self.launches[bot] = request["launch"]
             self._pid += 1
             identity = {
                 "pid": self._pid,
@@ -72,14 +85,45 @@ class FakeHelper:
             pass
         elif op == "console_clear_history":
             self.cleared.append(bot)
+        elif op.startswith("file_"):
+            try:
+                result = self._file_op(op, request)
+            except fileops.FileOpError as exc:
+                return {"ok": False, "error": exc.code, "message": exc.message}
         else:  # pragma: no cover - guards against protocol drift
             return {"ok": False, "error": "bad_op", "message": str(op)}
         return {"ok": True, "result": result}
 
+    def _file_op(self, op: str, request: dict[str, Any]) -> dict[str, Any]:
+        bot_root = self._bot_root(str(request["bot"]))
+        zone = str(request["zone"])
+        rel = str(request["path"])
+        if op == "file_list":
+            return {
+                "entries": [
+                    e.to_json() for e in fileops.list_dir(bot_root, zone, rel)
+                ]
+            }
+        if op == "file_read":
+            return fileops.read_file(bot_root, zone, rel)
+        if op == "file_write":
+            fileops.write_file(bot_root, zone, rel, str(request["content"]))
+            return {"written": len(str(request["content"]))}
+        if op == "file_mkdir":
+            fileops.make_dir(bot_root, zone, rel)
+            return {"created": rel}
+        if op == "file_delete":
+            fileops.delete_path(bot_root, zone, rel)
+            return {"deleted": rel}
+        if op == "file_rename":
+            fileops.rename_path(bot_root, zone, rel, str(request["to"]))
+            return {"renamed": str(request["to"])}
+        raise AssertionError(op)
+
 
 @pytest.fixture()
 def env(tmp_path: Path) -> tuple[TestClient, FakeHelper, Path]:
-    fake = FakeHelper()
+    fake = FakeHelper(tmp_path)
     app = create_app(
         AppConfig(
             root=tmp_path,
@@ -98,6 +142,9 @@ def login(client: TestClient, email: str, password: str) -> TestClient:
         "/auth/login", json={"email": email, "password": password}
     )
     assert resp.status_code == 200, resp.text
+    csrf = user_client.cookies.get("botenclave_csrf")
+    if csrf:
+        user_client.headers["X-CSRF-Token"] = csrf
     return user_client
 
 
@@ -305,3 +352,205 @@ def test_route_guard_scan() -> None:
 
     with pytest.raises(RuntimeError):
         assert_bot_routes_guarded(bare, object())
+
+
+# -- M3: CSRF, env/secrets, webhook, files ---------------------------------------
+
+
+def test_csrf_required_for_mutations(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    saved = admin.headers.pop("X-CSRF-Token")
+    resp = admin.post("/api/bots", json={"name": "nocsrf", "command": ["x"]})
+    assert resp.status_code == 403
+    admin.headers["X-CSRF-Token"] = "wrong-value"
+    resp = admin.post("/api/bots", json={"name": "nocsrf", "command": ["x"]})
+    assert resp.status_code == 403
+    admin.headers["X-CSRF-Token"] = saved
+    create_bot(admin, "nocsrf")
+
+
+def test_env_api_secrecy_and_spawn_merge(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, fake, root = env
+    admin = setup_admin(client, root)
+    guest_a = invite_and_login(admin, client, GUEST_A)
+    guest_b = invite_and_login(admin, client, GUEST_B)
+    create_bot(guest_a, "alpha")
+    resp = guest_a.put(
+        "/api/bots/alpha/env",
+        json={
+            "env": {"DISCORD_TOKEN": "secret-token-value", "OTHER": "x"},
+            "backend": "fernet",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    # Values are never re-displayed, and never reach the databases.
+    got = guest_a.get("/api/bots/alpha/env")
+    assert got.status_code == 200
+    assert "secret-token-value" not in got.text
+    assert set(got.json()["keys"]) == {"DISCORD_TOKEN", "OTHER"}
+    assert "secret-token-value" not in (root / "botmgr.db").read_bytes().decode(
+        errors="ignore"
+    )
+    enc = (root / "secrets" / "alpha.env.enc").read_text(encoding="ascii")
+    assert "secret-token-value" not in enc
+    # Another guest cannot read or replace the environment.
+    assert guest_b.get("/api/bots/alpha/env").status_code == 404
+    assert (
+        guest_b.put(
+            "/api/bots/alpha/env", json={"env": {}, "backend": "fernet"}
+        ).status_code
+        == 404
+    )
+    # At spawn, the secret is merged into the launch payload only.
+    resp = guest_a.post("/api/bots/alpha/start")
+    assert resp.status_code == 200
+    assert fake.launches["alpha"]["env"]["DISCORD_TOKEN"] == "secret-token-value"
+    stored = client.app.state.store.get_bot("alpha")  # type: ignore[attr-defined]
+    assert "DISCORD_TOKEN" not in stored.config.env
+
+
+def test_memory_backend_secret_pending_after_restart(tmp_path: Path) -> None:
+    def build() -> tuple[TestClient, FakeHelper]:
+        fake = FakeHelper(tmp_path)
+        app = create_app(
+            AppConfig(
+                root=tmp_path,
+                secret="test-secret",
+                cookie_secure=False,
+                transport_override=fake,
+            )
+        )
+        return TestClient(app), fake
+
+    client1, fake1 = build()
+    with client1:
+        token = (tmp_path / "setup-token").read_text(encoding="ascii").strip()
+        assert (
+            client1.post(
+                "/setup",
+                json={"token": token, "email": ADMIN[0], "password": ADMIN[1]},
+            ).status_code
+            == 200
+        )
+        admin1 = login(client1, *ADMIN)
+        create_bot(admin1, "beta")
+        resp = admin1.put(
+            "/api/bots/beta/env",
+            json={"env": {"DISCORD_TOKEN": "tok"}, "backend": "memory"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert admin1.post("/api/bots/beta/start").status_code == 200
+        assert fake1.launches["beta"]["env"]["DISCORD_TOKEN"] == "tok"
+        admin1.post("/api/bots/beta/stop")
+
+    client2, _fake2 = build()
+    with client2:
+        admin2 = login(client2, *ADMIN)
+        resp = admin2.post("/api/bots/beta/start")
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "secret-pending"
+        bots = admin2.get("/api/bots").json()
+        assert bots[0]["state"] == "secret-pending"
+
+
+def test_webhook_signature_suite(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    import hashlib
+    import hmac as hmac_mod
+    import json as json_mod
+
+    from botmgr.secrets import encrypt_text, load_or_create_fernet
+
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "gamma")
+    store = client.app.state.store  # type: ignore[attr-defined]
+    url = "https://example.com/x.git"
+    store.set_source(
+        "gamma", "git", encrypt_text(load_or_create_fernet(root), url), "main"
+    )
+    resp = admin.post("/api/bots/gamma/webhook-secret")
+    assert resp.status_code == 200
+    secret = resp.json()["secret"]
+
+    def call(body_obj: dict, ts: str, sig_secret: str) -> int:
+        body = json_mod.dumps(body_obj).encode()
+        sig = hmac_mod.new(
+            sig_secret.encode(), f"{ts}.".encode() + body, hashlib.sha256
+        ).hexdigest()
+        return client.post(
+            "/webhooks/git/gamma",
+            content=body,
+            headers={
+                "X-BotEnclave-Timestamp": ts,
+                "X-BotEnclave-Signature": sig,
+            },
+        ).status_code
+
+    now = str(int(time.time()))
+    good = {"repo": url, "branch": "main"}
+    assert call(good, now, secret) == 202
+    assert call(good, now, "wrong-secret") == 401
+    assert call(good, str(int(time.time()) - 100000), secret) == 401
+    assert call({"repo": "https://example.com/other.git", "branch": "main"}, now, secret) == 400
+    assert call({"repo": url, "branch": "dev"}, now, secret) == 400
+    # Unknown bot: same 401 as a bad signature (no existence oracle).
+    body = json_mod.dumps(good).encode()
+    sig = hmac_mod.new(secret.encode(), f"{now}.".encode() + body, hashlib.sha256).hexdigest()
+    resp = client.post(
+        "/webhooks/git/ghost",
+        content=body,
+        headers={"X-BotEnclave-Timestamp": now, "X-BotEnclave-Signature": sig},
+    )
+    assert resp.status_code == 401
+
+
+def test_files_api_and_confinement(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    guest_a = invite_and_login(admin, client, GUEST_A)
+    guest_b = invite_and_login(admin, client, GUEST_B)
+    create_bot(guest_a, "alpha")
+
+    resp = guest_a.put(
+        "/api/bots/alpha/files/content",
+        json={"zone": "data", "path": "config.json", "content": '{"a": 1}'},
+    )
+    assert resp.status_code == 200, resp.text
+    listing = guest_a.get("/api/bots/alpha/files?zone=data&path=").json()
+    assert any(e["name"] == "config.json" for e in listing["entries"])
+    content = guest_a.get(
+        "/api/bots/alpha/files/content?zone=data&path=config.json"
+    ).json()
+    assert content["content"] == '{"a": 1}'
+    # Read-only zones refuse writes through the API as well.
+    resp = guest_a.put(
+        "/api/bots/alpha/files/content",
+        json={"zone": "releases", "path": "x.py", "content": "x"},
+    )
+    assert resp.status_code == 400
+    # Traversal and planted symlinks are refused.
+    resp = guest_a.get("/api/bots/alpha/files/content?zone=data&path=../secret")
+    assert resp.status_code == 400
+    outside = root / "outside.txt"
+    outside.write_text("nope", encoding="utf-8")
+    (root / "bots" / "alpha" / "data" / "esc").symlink_to(outside)
+    resp = guest_a.get("/api/bots/alpha/files/content?zone=data&path=esc")
+    assert resp.status_code == 400
+    # IDOR: another guest gets 404 everywhere in the file API.
+    assert guest_b.get("/api/bots/alpha/files?zone=data&path=").status_code == 404
+    assert (
+        guest_b.put(
+            "/api/bots/alpha/files/content",
+            json={"zone": "data", "path": "x", "content": "y"},
+        ).status_code
+        == 404
+    )

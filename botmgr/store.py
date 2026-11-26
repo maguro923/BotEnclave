@@ -35,7 +35,27 @@ CREATE TABLE IF NOT EXISTS bot_state (
     boot_id TEXT,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS releases (
+    bot_id TEXT NOT NULL REFERENCES bots(bot_id),
+    release_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bot_id, release_id)
+);
+CREATE TABLE IF NOT EXISTS token_registry (
+    bot_id TEXT PRIMARY KEY REFERENCES bots(bot_id),
+    token_hash TEXT NOT NULL
+);
 """
+
+_BOT_COLUMN_MIGRATIONS = {
+    "secret_backend": "TEXT NOT NULL DEFAULT 'fernet'",
+    "source_type": "TEXT",
+    "git_url_enc": "TEXT",
+    "git_branch": "TEXT",
+    "dotenv_mode": "INTEGER NOT NULL DEFAULT 0",
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +65,19 @@ class StoredBot:
     state: BotState
     identity: ProcessIdentity | None
     owner_id: int | None = None
+    secret_backend: str = "fernet"
+    source_type: str | None = None
+    git_branch: str | None = None
+    dotenv_mode: bool = False
+
+
+@dataclass(frozen=True)
+class ReleaseRecord:
+    bot_id: str
+    release_id: str
+    source_ref: str
+    created_at: float
+    active: bool
 
 
 def config_to_json(config: LaunchConfig) -> str:
@@ -80,6 +113,9 @@ class StateStore:
         }
         if "owner_id" not in columns:
             self._conn.execute("ALTER TABLE bots ADD COLUMN owner_id INTEGER")
+        for name, ddl in _BOT_COLUMN_MIGRATIONS.items():
+            if name not in columns:
+                self._conn.execute(f"ALTER TABLE bots ADD COLUMN {name} {ddl}")
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -91,17 +127,30 @@ class StateStore:
         self, bot_id: str, config: LaunchConfig, owner_id: int | None = None
     ) -> None:
         with self._lock:
+            # Preserve metadata columns across re-registration: reconcile
+            # and set_config replace the launch config, but ownership,
+            # secret backend, source and dotenv mode are independent
+            # settings that a REPLACE would silently reset to defaults.
+            row = self._conn.execute(
+                "SELECT owner_id, secret_backend, source_type, git_url_enc,"
+                " git_branch, dotenv_mode FROM bots WHERE bot_id = ?",
+                (bot_id,),
+            ).fetchone()
             if owner_id is None:
-                # Preserve an existing owner: reconcile re-registers bots
-                # without knowing (or needing) ownership.
-                row = self._conn.execute(
-                    "SELECT owner_id FROM bots WHERE bot_id = ?", (bot_id,)
-                ).fetchone()
                 owner_id = row[0] if row else None
+            preserved = row[1:] if row else ("fernet", None, None, None, 0)
             self._conn.execute(
-                "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at, owner_id)"
-                " VALUES (?, ?, ?, ?)",
-                (bot_id, config_to_json(config), time.time(), owner_id),
+                "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at,"
+                " owner_id, secret_backend, source_type, git_url_enc,"
+                " git_branch, dotenv_mode)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    bot_id,
+                    config_to_json(config),
+                    time.time(),
+                    owner_id,
+                    *preserved,
+                ),
             )
             self._conn.execute(
                 "INSERT OR IGNORE INTO bot_state"
@@ -133,11 +182,25 @@ class StateStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT b.bot_id, b.launch_json, s.state, s.pid, s.start_time,"
-                " s.boot_id, b.owner_id FROM bots b"
+                " s.boot_id, b.owner_id, b.secret_backend, b.source_type,"
+                " b.git_branch, b.dotenv_mode FROM bots b"
                 " LEFT JOIN bot_state s ON s.bot_id = b.bot_id ORDER BY b.bot_id"
             ).fetchall()
         result: list[StoredBot] = []
-        for bot_id, launch_json, state, pid, start_time, boot_id, owner_id in rows:
+        for row in rows:
+            (
+                bot_id,
+                launch_json,
+                state,
+                pid,
+                start_time,
+                boot_id,
+                owner_id,
+                secret_backend,
+                source_type,
+                git_branch,
+                dotenv_mode,
+            ) = row
             identity = None
             if pid is not None and start_time is not None and boot_id is not None:
                 identity = ProcessIdentity(
@@ -150,6 +213,10 @@ class StateStore:
                     state=BotState(state) if state else BotState.STOPPED,
                     identity=identity,
                     owner_id=owner_id,
+                    secret_backend=secret_backend or "fernet",
+                    source_type=source_type,
+                    git_branch=git_branch,
+                    dotenv_mode=bool(dotenv_mode),
                 )
             )
         return result
@@ -171,5 +238,128 @@ class StateStore:
     def remove_bot(self, bot_id: str) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM bot_state WHERE bot_id = ?", (bot_id,))
+            self._conn.execute("DELETE FROM releases WHERE bot_id = ?", (bot_id,))
+            self._conn.execute(
+                "DELETE FROM token_registry WHERE bot_id = ?", (bot_id,)
+            )
             self._conn.execute("DELETE FROM bots WHERE bot_id = ?", (bot_id,))
             self._conn.commit()
+
+    # -- M3: secrets backend, source, releases, token registry ----------------
+
+    def set_secret_backend(self, bot_id: str, backend: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET secret_backend = ? WHERE bot_id = ?",
+                (backend, bot_id),
+            )
+            self._conn.commit()
+
+    def set_dotenv_mode(self, bot_id: str, enabled: bool) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET dotenv_mode = ? WHERE bot_id = ?",
+                (1 if enabled else 0, bot_id),
+            )
+            self._conn.commit()
+
+    def set_source(
+        self, bot_id: str, kind: str, git_url_enc: str | None, branch: str | None
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET source_type = ?, git_url_enc = ?, git_branch = ?"
+                " WHERE bot_id = ?",
+                (kind, git_url_enc, branch, bot_id),
+            )
+            self._conn.commit()
+
+    def get_source(self, bot_id: str) -> tuple[str, str | None, str | None] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT source_type, git_url_enc, git_branch FROM bots"
+                " WHERE bot_id = ?",
+                (bot_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return (str(row[0]), row[1], row[2])
+
+    def record_release(
+        self, bot_id: str, release_id: str, source_ref: str
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO releases"
+                " (bot_id, release_id, source_ref, created_at, active)"
+                " VALUES (?, ?, ?, ?, 0)",
+                (bot_id, release_id, source_ref, time.time()),
+            )
+            self._conn.commit()
+
+    def list_releases(self, bot_id: str) -> list[ReleaseRecord]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT release_id, source_ref, created_at, active FROM releases"
+                " WHERE bot_id = ? ORDER BY created_at DESC",
+                (bot_id,),
+            ).fetchall()
+        return [
+            ReleaseRecord(
+                bot_id=bot_id,
+                release_id=row[0],
+                source_ref=row[1],
+                created_at=row[2],
+                active=bool(row[3]),
+            )
+            for row in rows
+        ]
+
+    def set_active_release(self, bot_id: str, release_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE releases SET active = 0 WHERE bot_id = ?", (bot_id,)
+            )
+            cursor = self._conn.execute(
+                "UPDATE releases SET active = 1 WHERE bot_id = ? AND release_id = ?",
+                (bot_id, release_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"unknown release {release_id} for bot {bot_id}")
+            self._conn.commit()
+
+    def active_release(self, bot_id: str) -> ReleaseRecord | None:
+        for record in self.list_releases(bot_id):
+            if record.active:
+                return record
+        return None
+
+    def delete_release(self, bot_id: str, release_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM releases WHERE bot_id = ? AND release_id = ?",
+                (bot_id, release_id),
+            )
+            self._conn.commit()
+
+    def set_token_hash(self, bot_id: str, token_hash: str | None) -> None:
+        with self._lock:
+            if token_hash is None:
+                self._conn.execute(
+                    "DELETE FROM token_registry WHERE bot_id = ?", (bot_id,)
+                )
+            else:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO token_registry (bot_id, token_hash)"
+                    " VALUES (?, ?)",
+                    (bot_id, token_hash),
+                )
+            self._conn.commit()
+
+    def token_hash_owner(self, token_hash: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT bot_id FROM token_registry WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+        return str(row[0]) if row else None

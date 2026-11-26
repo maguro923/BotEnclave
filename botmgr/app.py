@@ -15,21 +15,28 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import hashlib
+import hmac
 import json
 import secrets as stdlib_secrets
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import (
     Depends,
     FastAPI,
+    File,
     HTTPException,
     Request,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -40,15 +47,31 @@ from botmgr.auth.models import User
 from botmgr.auth.routes import build_auth_router, setup_token_path
 from botmgr.auth.service import AuthService
 from botmgr.console import CaptureController
-from botmgr.helper import HelperClient, Transport, direct_transport, sudo_transport
+from botmgr.deploy import DeployError, DeployService
+from botmgr.envstore import SecretsError, SecretsService
+from botmgr.helper import (
+    HelperClient,
+    HelperError,
+    Transport,
+    direct_transport,
+    sudo_transport,
+)
 from botmgr.helper_backend import HelperBackend
 from botmgr.helperd import BOT_NAME_RE
 from botmgr.launcher import LaunchConfig
 from botmgr.logtail import LogFollower, read_tail
 from botmgr.reconcile import reconcile
+from botmgr.secrets import decrypt_text, encrypt_text, load_or_create_fernet
 from botmgr.store import StateStore, StoredBot
-from botmgr.supervisor import BusyError, Supervisor
+from botmgr.supervisor import BusyError, SecretPendingError, Supervisor
 from botmgr.watchdog import Watchdog
+from botmgr.webhooks import WebhookSecrets
+
+CSRF_COOKIE = "botenclave_csrf"
+CSRF_HEADER = "x-csrf-token"
+AUTH_COOKIE = "botenclave_auth"
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_WEBHOOK_BYTES = 1024 * 1024
 
 BASE_DIR = Path(__file__).parent
 WATCHDOG_INTERVAL_SECONDS = 5.0
@@ -81,9 +104,13 @@ def visible_bots(user: User, bots: list[StoredBot]) -> list[StoredBot]:
     return [b for b in bots if b.owner_id == user.id]
 
 
-def assert_bot_routes_guarded(app: FastAPI, guard: object) -> None:
+def assert_bot_routes_guarded(
+    app: FastAPI, guard: object, exempt_paths: frozenset[str] = frozenset()
+) -> None:
     """Startup check: every route addressing a bot must depend on the
-    guard, so a future route cannot forget the ownership check."""
+    guard, so a future route cannot forget the ownership check. Exempt
+    paths (the HMAC-signed git webhook) carry their own authentication
+    and are listed explicitly by the caller."""
 
     def walk(dependant: Any) -> list[object]:
         found: list[object] = []
@@ -94,7 +121,7 @@ def assert_bot_routes_guarded(app: FastAPI, guard: object) -> None:
 
     for route in app.routes:
         path = getattr(route, "path", "")
-        if "{bot_id}" in path:
+        if "{bot_id}" in path and path not in exempt_paths:
             dependant = getattr(route, "dependant", None)
             calls = walk(dependant) if dependant is not None else []
             if guard not in calls:
@@ -116,10 +143,15 @@ def create_app(config: AppConfig) -> FastAPI:
     else:
         transport = direct_transport(root, config.package_dir)
     client = HelperClient(transport)
-    supervisor = Supervisor(HelperBackend(client), store=store)
+    secrets_service = SecretsService(root, store)
+    supervisor = Supervisor(
+        HelperBackend(client), store=store, env_provider=secrets_service.resolve
+    )
     capture = CaptureController(client)
     watchdog = Watchdog(supervisor, client, capture, root)
     audit = AuditLog(root / "audit.log")
+    deploy_service = DeployService(root, store, supervisor, client)
+    webhook_secrets = WebhookSecrets(root)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     current_user = bundle.current_user
     current_user_optional = bundle.fastapi_users.current_user(
@@ -168,8 +200,53 @@ def create_app(config: AppConfig) -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
             store.close()
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
 
     app = FastAPI(title="BotEnclave", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def csrf_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # Double-submit cookie on every mutating API call (PLAN 2.5).
+        # Login is excluded (no session exists yet; SameSite=Lax plus the
+        # JSON content type cover it), as are signed webhooks.
+        path = request.url.path
+        mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
+        protected = path.startswith(("/api/", "/admin/", "/auth/")) and path != (
+            "/auth/login"
+        )
+        if mutating and protected:
+            cookie = request.cookies.get(CSRF_COOKIE)
+            header = request.headers.get(CSRF_HEADER)
+            if (
+                not cookie
+                or not header
+                or not hmac.compare_digest(cookie, header)
+            ):
+                return JSONResponse(
+                    {"detail": "CSRF token missing or invalid"}, status_code=403
+                )
+        response = await call_next(request)
+        set_cookie = response.headers.get("set-cookie", "")
+        if (AUTH_COOKIE in request.cookies or AUTH_COOKIE in set_cookie) and (
+            CSRF_COOKIE not in request.cookies
+        ):
+            response.set_cookie(
+                CSRF_COOKIE,
+                stdlib_secrets.token_urlsafe(24),
+                httponly=False,
+                samesite="lax",
+                secure=config.cookie_secure,
+                path="/",
+            )
+        return response
+
+    async def check_origin(websocket: WebSocket) -> None:
+        # CSWSH guard (PLAN 2.5): a present Origin must match the Host.
+        origin = websocket.headers.get("origin")
+        if origin and urlparse(origin).netloc != websocket.headers.get("host", ""):
+            raise HTTPException(status_code=403, detail="origin mismatch")
+
     app.include_router(build_auth_router(bundle, service))
     app.mount(
         "/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static"
@@ -200,7 +277,12 @@ def create_app(config: AppConfig) -> FastAPI:
             {
                 "user": user,
                 "bots": [
-                    {"id": b.bot_id, "state": supervisor.state(b.bot_id).value}
+                    {
+                        "id": b.bot_id,
+                        "state": supervisor.state(b.bot_id).value,
+                        "secret_backend": b.secret_backend,
+                        "dotenv_mode": b.dotenv_mode,
+                    }
                     for b in bots
                 ],
             },
@@ -241,10 +323,15 @@ def create_app(config: AppConfig) -> FastAPI:
 
     # -- bot API ---------------------------------------------------------------
     @app.get("/api/bots")
-    async def list_bots(user: User = Depends(current_user)) -> list[dict[str, str]]:  # type: ignore[arg-type]
+    async def list_bots(user: User = Depends(current_user)) -> list[dict[str, object]]:  # type: ignore[arg-type]
         bots = visible_bots(user, store.load_all())
         return [
-            {"id": b.bot_id, "state": supervisor.state(b.bot_id).value}
+            {
+                "id": b.bot_id,
+                "state": supervisor.state(b.bot_id).value,
+                "secret_backend": b.secret_backend,
+                "dotenv_mode": b.dotenv_mode,
+            }
             for b in bots
         ]
 
@@ -293,6 +380,8 @@ def create_app(config: AppConfig) -> FastAPI:
                 with contextlib.suppress(Exception):
                     supervisor.stop(bot)
             store.remove_bot(bot)
+            secrets_service.delete(bot)
+            webhook_secrets.delete(bot)
             client.delete_user(bot)
 
         await run_in_threadpool(do_delete)
@@ -308,6 +397,9 @@ def create_app(config: AppConfig) -> FastAPI:
             await run_in_threadpool(supervisor.start, stored.bot_id)
         except BusyError:
             raise HTTPException(status_code=409, detail="operation in progress") from None
+        except SecretPendingError:
+            audit.record(user.email, "bot.start.secret_pending", stored.bot_id)
+            return {"state": "secret-pending"}
         audit.record(user.email, "bot.start", stored.bot_id)
         return {"state": supervisor.state(stored.bot_id).value}
 
@@ -333,6 +425,412 @@ def create_app(config: AppConfig) -> FastAPI:
         tail = await run_in_threadpool(read_tail, path, max(1, min(lines, 2000)))
         return {"lines": tail}
 
+    # -- environment / secrets (values are never re-displayed, PLAN 3.3) -------
+    @app.get("/api/bots/{bot_id}/env")
+    async def get_env(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        return {
+            "backend": stored.secret_backend,
+            "keys": secrets_service.keys(stored.bot_id),
+            "dotenv_mode": stored.dotenv_mode,
+        }
+
+    @app.put("/api/bots/{bot_id}/env")
+    async def put_env(
+        body: dict[str, Any],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        env = body.get("env")
+        backend = body.get("backend", stored.secret_backend)
+        if (
+            not isinstance(env, dict)
+            or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+            )
+            or not isinstance(backend, str)
+        ):
+            raise HTTPException(status_code=400, detail="env must be an object of strings")
+        warnings: list[str] = []
+        token = env.get("DISCORD_TOKEN")
+        bot_identity: dict[str, str] | None = None
+        if token:
+            digest = hashlib.sha256(token.encode()).hexdigest()
+            other = store.token_hash_owner(digest)
+            if other is not None and other != bot:
+                warnings.append(
+                    f"the same DISCORD_TOKEN is already registered to bot '{other}'"
+                )
+            bot_identity = await _verify_discord_token(token)
+            if bot_identity is None:
+                warnings.append("DISCORD_TOKEN could not be verified with Discord")
+        try:
+            await run_in_threadpool(secrets_service.set_env, bot, env, backend)
+        except SecretsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        audit.record(
+            user.email,
+            "env.update",
+            bot,
+            f"backend={backend} keys={len(env)}",
+        )
+        return {"status": "ok", "warnings": warnings, "bot_identity": bot_identity}
+
+    @app.post("/api/bots/{bot_id}/dotenv-mode")
+    async def set_dotenv_mode(
+        body: dict[str, Any],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="enabled must be a boolean")
+        store.set_dotenv_mode(stored.bot_id, enabled)
+        audit.record(
+            user.email, "env.dotenv_mode", stored.bot_id, f"enabled={enabled}"
+        )
+        return {"dotenv_mode": enabled}
+
+    # -- deploy / releases -------------------------------------------------------
+    @app.post("/api/bots/{bot_id}/deploy/git")
+    async def deploy_git(
+        body: dict[str, Any],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        url = body.get("url")
+        branch = body.get("branch")
+        if not isinstance(url, str) or not (
+            branch is None or isinstance(branch, str)
+        ):
+            raise HTTPException(status_code=400, detail="url and branch required")
+        fernet = load_or_create_fernet(root)
+        url_enc = encrypt_text(fernet, url)
+        try:
+            result = await run_in_threadpool(
+                deploy_service.deploy_git,
+                bot,
+                url,
+                branch,
+                url_enc=url_enc,
+            )
+        except DeployError as exc:
+            audit.record(user.email, "deploy.git.failed", bot, _safe_detail(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        audit.record(user.email, "deploy.git", bot, f"release={result.release_id}")
+        return {
+            "release_id": result.release_id,
+            "entry": result.entry,
+            "state": result.state,
+        }
+
+    @app.post("/api/bots/{bot_id}/deploy/upload")
+    async def deploy_upload(
+        file: UploadFile = File(...),
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        filename = Path(file.filename or "upload.zip").name
+        tmp_dir = root / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"upload-{stdlib_secrets.token_hex(6)}.zip"
+        data = bytearray()
+        while chunk := await file.read(65536):
+            data += chunk
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="upload too large")
+        await run_in_threadpool(tmp_path.write_bytes, bytes(data))
+        try:
+            result = await run_in_threadpool(
+                deploy_service.deploy_zip, bot, tmp_path, filename
+            )
+        except DeployError as exc:
+            audit.record(user.email, "deploy.upload.failed", bot, _safe_detail(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        audit.record(user.email, "deploy.upload", bot, f"release={result.release_id}")
+        return {
+            "release_id": result.release_id,
+            "entry": result.entry,
+            "state": result.state,
+        }
+
+    @app.get("/api/bots/{bot_id}/releases")
+    async def list_releases(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "release_id": r.release_id,
+                "source_ref": r.source_ref,
+                "created_at": r.created_at,
+                "active": r.active,
+            }
+            for r in deploy_service.releases(stored.bot_id)
+        ]
+
+    @app.get("/api/bots/{bot_id}/releases/{release_id}/log")
+    async def release_log(
+        release_id: str,
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        known = {r.release_id for r in deploy_service.releases(stored.bot_id)}
+        if release_id not in known:
+            raise HTTPException(status_code=404, detail="no such release")
+        log = await run_in_threadpool(
+            deploy_service.deploy_log, stored.bot_id, release_id
+        )
+        return {"log": log}
+
+    @app.post("/api/bots/{bot_id}/rollback")
+    async def rollback(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        try:
+            result = await run_in_threadpool(deploy_service.rollback, bot)
+        except DeployError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        audit.record(user.email, "deploy.rollback", bot, f"release={result.release_id}")
+        return {
+            "release_id": result.release_id,
+            "entry": result.entry,
+            "state": result.state,
+        }
+
+    # -- webhook secret ------------------------------------------------------------
+    @app.get("/api/bots/{bot_id}/webhook")
+    async def webhook_status(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        return {"configured": webhook_secrets.has_secret(stored.bot_id)}
+
+    @app.post("/api/bots/{bot_id}/webhook-secret")
+    async def webhook_rotate(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        secret = webhook_secrets.rotate(stored.bot_id)
+        audit.record(user.email, "webhook.rotate", stored.bot_id)
+        return {"secret": secret}
+
+    # -- file management (PLAN 2.8) --------------------------------------------------
+    def _file_error(exc: HelperError) -> HTTPException:
+        status = {
+            "bad_path": 400,
+            "bad_zone": 400,
+            "read_only": 400,
+            "symlink": 400,
+            "escape": 400,
+            "not_dir": 404,
+            "not_file": 404,
+            "missing": 404,
+            "too_large": 413,
+            "exists": 409,
+            "is_dir": 400,
+        }.get(exc.code, 400)
+        return HTTPException(status_code=status, detail=exc.message)
+
+    @app.get("/api/bots/{bot_id}/files")
+    async def files_list(
+        zone: str = "data",
+        path: str = "",
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        try:
+            entries = await run_in_threadpool(
+                client.file_list, stored.bot_id, zone, path
+            )
+        except HelperError as exc:
+            raise _file_error(exc) from None
+        return {"entries": entries}
+
+    @app.get("/api/bots/{bot_id}/files/content")
+    async def files_read(
+        zone: str = "data",
+        path: str = "",
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        try:
+            return await run_in_threadpool(
+                client.file_read, stored.bot_id, zone, path
+            )
+        except HelperError as exc:
+            raise _file_error(exc) from None
+
+    @app.get("/api/bots/{bot_id}/files/download")
+    async def files_download(
+        zone: str = "data",
+        path: str = "",
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> Response:
+        import base64
+
+        try:
+            result = await run_in_threadpool(
+                client.file_read, stored.bot_id, zone, path
+            )
+        except HelperError as exc:
+            raise _file_error(exc) from None
+        if result.get("kind") == "text":
+            data = str(result["content"]).encode()
+        else:
+            data = base64.b64decode(str(result["content_b64"]))
+        name = Path(path).name or "download"
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
+    @app.put("/api/bots/{bot_id}/files/content")
+    async def files_write(
+        body: dict[str, Any],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        zone = body.get("zone", "data")
+        path = body.get("path")
+        content = body.get("content")
+        if not isinstance(path, str) or not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="path and content required")
+        try:
+            await run_in_threadpool(
+                client.file_write, stored.bot_id, zone, path, content
+            )
+        except HelperError as exc:
+            raise _file_error(exc) from None
+        audit.record(user.email, "file.write", stored.bot_id, f"{zone}:{path}")
+        return {"status": "ok"}
+
+    @app.post("/api/bots/{bot_id}/files/mkdir")
+    async def files_mkdir(
+        body: dict[str, Any],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        try:
+            await run_in_threadpool(
+                client.file_mkdir,
+                stored.bot_id,
+                body.get("zone", "data"),
+                body.get("path", ""),
+            )
+        except HelperError as exc:
+            raise _file_error(exc) from None
+        audit.record(
+            user.email, "file.mkdir", stored.bot_id, f"data:{body.get('path', '')}"
+        )
+        return {"status": "ok"}
+
+    @app.delete("/api/bots/{bot_id}/files")
+    async def files_delete(
+        zone: str = "data",
+        path: str = "",
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        try:
+            await run_in_threadpool(
+                client.file_delete, stored.bot_id, zone, path
+            )
+        except HelperError as exc:
+            raise _file_error(exc) from None
+        audit.record(user.email, "file.delete", stored.bot_id, f"{zone}:{path}")
+        return {"status": "ok"}
+
+    @app.post("/api/bots/{bot_id}/files/rename")
+    async def files_rename(
+        body: dict[str, Any],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        try:
+            await run_in_threadpool(
+                client.file_rename,
+                stored.bot_id,
+                body.get("zone", "data"),
+                body.get("path", ""),
+                body.get("to", ""),
+            )
+        except HelperError as exc:
+            raise _file_error(exc) from None
+        audit.record(
+            user.email,
+            "file.rename",
+            stored.bot_id,
+            f"{body.get('path', '')} -> {body.get('to', '')}",
+        )
+        return {"status": "ok"}
+
+    # -- git webhook (signed, per-bot secret; PLAN 2.5) --------------------------------
+    @app.post("/webhooks/git/{bot_id}")
+    async def git_webhook(bot_id: str, request: Request) -> Response:
+        body = await request.body()
+        if len(body) > MAX_WEBHOOK_BYTES:
+            raise HTTPException(status_code=413, detail="payload too large")
+        verified = webhook_secrets.verify(
+            bot_id,
+            request.headers.get("x-botenclave-timestamp"),
+            request.headers.get("x-botenclave-signature"),
+            body,
+        )
+        stored = store.get_bot(bot_id)
+        if not verified or stored is None:
+            raise HTTPException(status_code=401, detail="signature verification failed")
+        source = store.get_source(bot_id)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = {}
+        repo = payload.get("repo") if isinstance(payload, dict) else None
+        branch = payload.get("branch") if isinstance(payload, dict) else None
+        url: str | None = None
+        if source is not None and source[0] == "git" and source[1]:
+            try:
+                url = decrypt_text(load_or_create_fernet(root), source[1])
+            except Exception:  # noqa: BLE001
+                url = None
+        branch_ok = source is not None and (
+            source[2] is None or branch is None or branch == source[2]
+        )
+        if url is None or repo != url or not branch_ok:
+            audit.record("webhook", "webhook.rejected", bot_id, "repo/branch mismatch")
+            raise HTTPException(status_code=400, detail="repo/branch mismatch")
+        audit.record("webhook", "webhook.accepted", bot_id)
+
+        def run_deploy() -> None:
+            try:
+                result = deploy_service.deploy_git(
+                    bot_id,
+                    url,
+                    source[2] if source else None,
+                    url_enc=source[1] if source else None,
+                )
+                audit.record(
+                    "webhook", "deploy.git", bot_id, f"release={result.release_id}"
+                )
+            except Exception as exc:  # noqa: BLE001 - background: record, never raise
+                audit.record(
+                    "webhook", "deploy.git.failed", bot_id, _safe_detail(exc)
+                )
+
+        threading.Thread(target=run_deploy, daemon=True).start()
+        return JSONResponse({"status": "accepted"}, status_code=202)
+
     # -- admin: user deletion with bot transfer --------------------------------
     @app.delete("/admin/users/{user_id}")
     async def delete_user(
@@ -357,6 +855,8 @@ def create_app(config: AppConfig) -> FastAPI:
                         with contextlib.suppress(Exception):
                             supervisor.stop(bot_id)
                     store.remove_bot(bot_id)
+                    secrets_service.delete(bot_id)
+                    webhook_secrets.delete(bot_id)
                     client.delete_user(bot_id)
 
                 await run_in_threadpool(do_delete)
@@ -369,7 +869,9 @@ def create_app(config: AppConfig) -> FastAPI:
     # -- websockets ---------------------------------------------------------------
     @app.websocket("/ws/overview")
     async def overview_ws(
-        websocket: WebSocket, user: User = Depends(current_user)  # type: ignore[arg-type]
+        websocket: WebSocket,
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        _origin: None = Depends(check_origin),
     ) -> None:
         await websocket.accept()
         try:
@@ -393,6 +895,7 @@ def create_app(config: AppConfig) -> FastAPI:
         websocket: WebSocket,
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
+        _origin: None = Depends(check_origin),
     ) -> None:
         await websocket.accept()
         path = root / "bots" / stored.bot_id / "logs" / "console.log"
@@ -418,6 +921,7 @@ def create_app(config: AppConfig) -> FastAPI:
         websocket: WebSocket,
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
+        _origin: None = Depends(check_origin),
     ) -> None:
         bot = stored.bot_id
         await websocket.accept()
@@ -448,11 +952,42 @@ def create_app(config: AppConfig) -> FastAPI:
                     await asyncio.shield(run_in_threadpool(step))
             audit.record(user.email, "console.disconnect", bot)
 
-    assert_bot_routes_guarded(app, bot_access)
+    assert_bot_routes_guarded(
+        app, bot_access, exempt_paths=frozenset({"/webhooks/git/{bot_id}"})
+    )
     app.state.audit = audit
     app.state.supervisor = supervisor
     app.state.store = store
+    app.state.secrets = secrets_service
+    app.state.deploy = deploy_service
+    app.state.webhook_secrets = webhook_secrets
     return app
+
+
+def _safe_detail(exc: Exception) -> str:
+    """Error text for audit details: no credential-bearing URLs, capped."""
+    import re
+
+    text = re.sub(r"(https?://)[^/@\s]+@", r"\1", str(exc))
+    return text[:200]
+
+
+async def _verify_discord_token(token: str) -> dict[str, str] | None:
+    """Best-effort identity check against the Discord API (PLAN 3.3).
+    Any failure (network, bad token) returns None and becomes a warning,
+    never a hard error: the panel must not depend on Discord being up."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                "https://discord.com/api/v10/users/@me",
+                headers={"Authorization": f"Bot {token}"},
+            )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        return {"username": str(data.get("username", "")), "id": str(data.get("id", ""))}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _watchdog_loop(watchdog: Watchdog, audit: AuditLog) -> None:

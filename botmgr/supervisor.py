@@ -8,12 +8,14 @@ exit polling deterministically.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from botmgr.backend import Backend
+from botmgr.envstore import EnvResolution
 from botmgr.launcher import LaunchConfig
 from botmgr.procident import ProcessIdentity
 from botmgr.state import BotState, BotStateMachine
@@ -26,6 +28,10 @@ STOP_GRACE_SECONDS = 10.0
 
 class BusyError(Exception):
     """Another operation for the same bot is already in progress."""
+
+
+class SecretPendingError(Exception):
+    """The bot's secrets are not available to this process (PLAN 2.3)."""
 
 
 class UnknownBotError(KeyError):
@@ -46,12 +52,19 @@ class Supervisor:
         backend: Backend,
         now_fn: Callable[[], float] = time.monotonic,
         store: StateStore | None = None,
+        env_provider: Callable[[str], EnvResolution] | None = None,
     ) -> None:
         self._backend = backend
         self._now = now_fn
         self._store = store
+        self._env_provider = env_provider
         self._bots: dict[str, _BotEntry] = {}
         self.last_errors: dict[str, Exception] = {}
+
+    def _resolve(self, bot_id: str) -> EnvResolution | None:
+        if self._env_provider is None:
+            return None
+        return self._env_provider(bot_id)
 
     def register(
         self, bot_id: str, config: LaunchConfig, owner_id: int | None = None
@@ -113,15 +126,52 @@ class Supervisor:
         entry = self._entry(bot_id)
         self._locked(entry)
         try:
+            resolution = self._resolve(bot_id)
+            if resolution is not None and resolution.env is None:
+                entry.machine.mark_secret_pending(self._now())
+                raise SecretPendingError(bot_id)
             entry.machine.start(self._now())
-            self._spawn(bot_id, entry)
+            self._spawn(bot_id, entry, resolution)
         finally:
             self._persist(bot_id, entry)
             entry.lock.release()
 
-    def _spawn(self, bot_id: str, entry: _BotEntry) -> None:
+    def set_config(self, bot_id: str, config: LaunchConfig) -> None:
+        """Replace a bot's launch configuration (deploy / rollback). The
+        caller stops the bot first; the stored config never carries secret
+        values, which are merged only into the spawn-time copy."""
+        entry = self._entry(bot_id)
+        if entry.machine.state in (
+            BotState.STARTING,
+            BotState.RUNNING,
+            BotState.STOPPING,
+        ):
+            raise BusyError(f"bot {bot_id} is running; stop it before reconfiguring")
+        entry.config = config
+        if self._store is not None:
+            self._store.register_bot(bot_id, config)
+
+    def _spawn(
+        self,
+        bot_id: str,
+        entry: _BotEntry,
+        resolution: EnvResolution | None = None,
+    ) -> None:
+        if resolution is None:
+            resolution = self._resolve(bot_id)
+        config = entry.config
+        if resolution is not None:
+            if resolution.env is None:
+                entry.machine.mark_secret_pending(self._now())
+                raise SecretPendingError(bot_id)
+            config = dataclasses.replace(
+                config,
+                env={**config.env, **resolution.env},
+                use_credential=resolution.use_credential,
+                dotenv_mode=resolution.dotenv_mode,
+            )
         try:
-            entry.identity = self._backend.start(bot_id, entry.config)
+            entry.identity = self._backend.start(bot_id, config)
         except Exception:
             entry.identity = None
             entry.machine.mark_exited(self._now(), exit_code=-1)
