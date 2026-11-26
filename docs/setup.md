@@ -95,16 +95,22 @@ limits, are in [systemd.md](systemd.md).
 ## 4. First-run setup
 
 The manager listens on `127.0.0.1:8000` only — it is not reachable
-from other machines. On the host itself, open
-`http://127.0.0.1:8000/`. From your own machine, use an SSH tunnel
-(this is also the recommended way to reach the panel day to day;
-section 6 explains the alternatives and why a plain rebind is not
-one of them):
+from other machines — and serves HTTPS with a self-signed
+certificate generated at first start (there is no HTTP listener).
+On the host itself, open `https://127.0.0.1:8000/`. From your own
+machine, use an SSH tunnel (also the recommended way to reach the
+panel day to day; section 6 covers the details):
 
 ```sh
 ssh -L 8000:127.0.0.1:8000 <user>@<host>
-# then open http://127.0.0.1:8000/ in your local browser
+# then open https://127.0.0.1:8000/ in your local browser
 ```
+
+Either way the browser warns once about the self-signed
+certificate. That is expected: the certificate is generated on your
+host and never leaves it, and its SHA-256 fingerprint is printed in
+the manager's log at startup if you want to compare
+(`journalctl -u botenclave | grep tls:`).
 
 1. Open the panel as above. With no administrator existing yet, you
    are redirected to the setup page.
@@ -162,23 +168,26 @@ as that bot's OS user.
 
 ## 6. TLS and access
 
-The manager binds `127.0.0.1` by default and serves plain HTTP; it
-has no TLS of its own. Keep it that way, and reach it through an SSH
-tunnel (section 4) or a TLS-terminating reverse proxy.
+The panel serves HTTPS only, with a self-signed certificate the
+manager generates into its data root at first start
+(`tls-cert.pem` / `tls-key.pem`, key mode 600, five-year validity,
+covering `localhost`, the hostname and the host's addresses as seen
+at generation time). Plain HTTP is not served at all: an `http://`
+request to the port is refused by the TLS handshake, not
+redirected.
 
-Rebinding is possible — re-run `botmgr systemd install` with
-`--host 0.0.0.0` and restart the manager — but on its own it does not
-give you a working panel: anyone who can route to the host can open
-the login page, credentials travel unencrypted, and because of the
-`Secure` cookies below, the browser will not even keep you signed in
-over plain HTTP at a non-localhost address. Treat a rebind as one
-half of a setup whose other half is TLS in front.
-
-Session cookies are `Secure` by default, so over plain HTTP on a
-non-localhost address the browser will not send them and login will
-appear to loop. For anything beyond a trusted LAN, put BotEnclave
-behind a TLS-terminating reverse proxy (or a private tunnel) and
-keep the manager's own port unexposed.
+The manager binds `127.0.0.1` by default. Reach it on the host
+itself, through an SSH tunnel (section 4), or behind a reverse
+proxy. Because the panel now speaks HTTPS itself, rebinding is
+also a workable option: re-run `botmgr systemd install` with
+`--host 0.0.0.0` (or a specific address), restart, and the panel
+answers at `https://<host>:8000/`. Expect the browser's
+self-signed warning, anyone who can route to the host can open the
+login page, and if the host's address has changed since the
+certificate was generated, delete `tls-cert.pem` and
+`tls-key.pem` and restart to regenerate it with the current
+addresses. Session cookies are `Secure`, which HTTPS satisfies on
+any address, so logins hold on LAN addresses too.
 
 `--no-cookie-secure` disables the `Secure` flag for local development
 only. Do not use it on a reachable host.

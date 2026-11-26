@@ -70,10 +70,12 @@ idempotent; the manual steps are in [docs/setup.md](docs/setup.md).
 
 ## First steps
 
-1. The panel listens on `127.0.0.1:8000` only. Open
-   `http://127.0.0.1:8000/` on the host, or forward it over SSH
+1. The panel listens on `127.0.0.1:8000` only, over HTTPS. Open
+   `https://127.0.0.1:8000/` on the host, or forward it over SSH
    (`ssh -L 8000:127.0.0.1:8000 <user>@<host>`) and open the same
    address locally — you are redirected to the first-run setup. The
+   certificate is self-signed and generated on the host, so the
+   browser warns once. The
    setup token is printed at the end of the install run and stored
    in `/srv/botenclave/setup-token` (mode 600). Section 6 of
    [docs/setup.md](docs/setup.md) explains the access model.

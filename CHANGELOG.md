@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added: the panel now serves HTTPS with a self-signed certificate
+  generated locally at first start (`tls-cert.pem` / `tls-key.pem`
+  in the data root, five-year validity, covering localhost, the
+  hostname and the host's current addresses). Plain HTTP is no
+  longer served at all — the port refuses non-TLS requests instead
+  of redirecting them. This also makes the rebinding option in the
+  setup guide fully usable, since `Secure` session cookies now hold
+  on any address.
+
 - Added `scripts/install.sh`: one-shot production setup
   (prerequisites, package, manager user, systemd unit, first start).
   Idempotent.

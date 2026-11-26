@@ -68,12 +68,13 @@ fi
 i=0
 while [ $i -lt 30 ]; do
     if "$VENV/bin/python" -c '
-import sys, urllib.request
+import ssl, sys, urllib.request
 try:
-    urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=2)
+    ctx = ssl.create_default_context(cafile=sys.argv[1])
+    urllib.request.urlopen("https://127.0.0.1:8000/healthz", timeout=2, context=ctx)
 except Exception:
     sys.exit(1)
-' 2>/dev/null; then
+' "$ROOT/tls-cert.pem" 2>/dev/null; then
         break
     fi
     i=$((i + 1))
@@ -83,7 +84,10 @@ done
 
 say ""
 say "BotEnclave is running."
-say "Open http://<this-host>:8000/ to finish the first-run setup."
+say "Open https://127.0.0.1:8000/ on this host to finish the first-run setup."
+say "The panel serves HTTPS with a self-signed certificate, so the browser"
+say "warns on the first visit. From another machine, tunnel in instead:"
+say "  ssh -L 8000:127.0.0.1:8000 <user>@<this-host>"
 if [ -f "$ROOT/setup-token" ]; then
     say "Setup token: $(cat "$ROOT/setup-token")"
 else

@@ -320,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
 
         from botmgr.app import AppConfig, create_app
+        from botmgr.tls import cert_fingerprint, ensure_tls_material
 
         if args.no_cookie_secure:
             print(
@@ -327,6 +328,15 @@ def main(argv: list[str] | None = None) -> int:
                 " expose this instance directly (PLAN 3.2)",
                 file=sys.stderr,
             )
+        # HTTPS only: a self-signed certificate is generated on first
+        # start. There is no HTTP listener — plain HTTP to the port is
+        # refused by the TLS handshake, not redirected.
+        cert_path, key_path = ensure_tls_material(args.root)
+        print(
+            f"tls: serving HTTPS with {cert_path} "
+            f"(SHA-256 {cert_fingerprint(cert_path)})",
+            file=sys.stderr,
+        )
         app = create_app(
             AppConfig(
                 root=args.root,
@@ -337,7 +347,13 @@ def main(argv: list[str] | None = None) -> int:
                 bot_runtime=args.bot_runtime,
             )
         )
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            ssl_certfile=str(cert_path),
+            ssl_keyfile=str(key_path),
+        )
         return 0
     if args.command == "unlock":
         if asyncio.run(_unlock(args.root, args.email)):
