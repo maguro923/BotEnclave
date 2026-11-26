@@ -32,6 +32,13 @@ def test_material_created_with_sans_and_key_permissions(tmp_path: Path) -> None:
     assert cert_fingerprint(cert_path)
 
 
+def test_interface_ipv4s_are_valid_addresses() -> None:
+    from botmgr.tls import _interface_ipv4s
+
+    for raw in _interface_ipv4s():
+        assert ipaddress.ip_address(raw).version == 4
+
+
 def test_material_is_stable_across_calls(tmp_path: Path) -> None:
     cert_path, key_path = ensure_tls_material(tmp_path)
     first = (cert_path.read_bytes(), key_path.read_bytes())

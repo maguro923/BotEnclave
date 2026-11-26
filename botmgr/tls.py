@@ -33,12 +33,50 @@ KEY_FILENAME = "tls-key.pem"
 _VALIDITY_DAYS = 1825  # five years, like other self-hosted panels
 
 
+def _interface_ipv4s() -> list[str]:
+    """All IPv4 addresses assigned to local interfaces (SIOCGIFCONF).
+
+    Hostname resolution alone is not enough: on many servers the
+    hostname resolves to 127.0.1.1 while the LAN address lives only
+    on the interface, and a certificate missing that address fails
+    verification exactly where LAN access is used.
+    """
+    import array
+    import fcntl
+    import struct
+
+    max_bytes = 8192
+    names = array.array("B", b"\0" * max_bytes)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            out = fcntl.ioctl(
+                sock.fileno(),
+                0x8912,  # SIOCGIFCONF
+                struct.pack("iL", max_bytes, names.buffer_info()[0]),
+            )
+    except OSError:
+        return []
+    out_bytes = struct.unpack("iL", out[: struct.calcsize("iL")])[0]
+    data = names.tobytes()[:out_bytes]
+    result: list[str] = []
+    for offset in range(0, len(data) - 23, 40):  # sizeof(struct ifreq)
+        result.append(socket.inet_ntoa(data[offset + 20 : offset + 24]))
+    return result
+
+
 def _san_values() -> tuple[list[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]]:
     names = {"localhost"}
     addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = {
         ipaddress.ip_address("127.0.0.1"),
         ipaddress.ip_address("::1"),
     }
+    for raw in _interface_ipv4s():
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if not ip.is_unspecified:
+            addresses.add(ip)
     try:
         hostname = socket.gethostname()
     except OSError:
