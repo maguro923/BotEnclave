@@ -91,6 +91,27 @@ class HelperClient:
         )
         return int(result["exit_code"])
 
+    def set_capture(self, bot: str, enabled: bool) -> None:
+        self._call({"op": "set_capture", "bot": bot, "enabled": enabled})
+
+    def capture_state(self, bot: str) -> bool:
+        result = self._call({"op": "capture_state", "bot": bot})
+        return bool(result["enabled"])
+
+    def console_snapshot(self, bot: str) -> str:
+        result = self._call({"op": "console_snapshot", "bot": bot})
+        return str(result["text"])
+
+    def console_send(self, bot: str, text: str, enter: bool = True) -> None:
+        self._call(
+            {"op": "console_send", "bot": bot, "text": text, "enter": enter}
+        )
+
+    def console_resize(self, bot: str, cols: int, rows: int) -> None:
+        self._call(
+            {"op": "console_resize", "bot": bot, "cols": cols, "rows": rows}
+        )
+
     def bot_status(
         self, bot: str, identity: ProcessIdentity
     ) -> tuple[bool, int | None]:

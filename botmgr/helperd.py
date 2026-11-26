@@ -93,6 +93,11 @@ class Executor(Protocol):
     def bot_status(
         self, bot: str, identity: ProcessIdentity
     ) -> tuple[bool, int | None]: ...
+    def set_capture(self, bot: str, enabled: bool) -> None: ...
+    def capture_state(self, bot: str) -> bool: ...
+    def console_snapshot(self, bot: str) -> str: ...
+    def console_send(self, bot: str, text: str, enter: bool) -> None: ...
+    def console_resize(self, bot: str, cols: int, rows: int) -> None: ...
 
 
 @dataclasses.dataclass
@@ -162,6 +167,44 @@ class Helper:
             identity = validate_identity(request.get("identity"))
             alive, status_exit_code = self.executor.bot_status(bot, identity)
             return {"alive": alive, "exit_code": status_exit_code}
+        if op == "set_capture":
+            _reject_unknown_keys(request, {"op", "bot", "enabled"})
+            bot = validate_bot_name(request.get("bot"))
+            enabled = request.get("enabled")
+            if not isinstance(enabled, bool):
+                raise RequestError("bad_request", "enabled must be a boolean")
+            self.executor.set_capture(bot, enabled)
+            return {"enabled": enabled}
+        if op == "capture_state":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            return {"enabled": self.executor.capture_state(bot)}
+        if op == "console_snapshot":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            return {"text": self.executor.console_snapshot(bot)}
+        if op == "console_send":
+            _reject_unknown_keys(request, {"op", "bot", "text", "enter"})
+            bot = validate_bot_name(request.get("bot"))
+            text = request.get("text")
+            if not isinstance(text, str) or len(text) > 4096 or "\x00" in text:
+                raise RequestError("bad_request", "text must be a string of at most 4096 chars")
+            enter = request.get("enter", True)
+            if not isinstance(enter, bool):
+                raise RequestError("bad_request", "enter must be a boolean")
+            self.executor.console_send(bot, text, enter)
+            return {"sent": len(text)}
+        if op == "console_resize":
+            _reject_unknown_keys(request, {"op", "bot", "cols", "rows"})
+            bot = validate_bot_name(request.get("bot"))
+            cols = request.get("cols")
+            rows = request.get("rows")
+            if not isinstance(cols, int) or not 20 <= cols <= 500:
+                raise RequestError("bad_request", "cols out of range")
+            if not isinstance(rows, int) or not 5 <= rows <= 200:
+                raise RequestError("bad_request", "rows out of range")
+            self.executor.console_resize(bot, cols, rows)
+            return {"cols": cols, "rows": rows}
         raise RequestError("bad_request", f"unknown op: {op!r}")
 
 
@@ -327,6 +370,8 @@ class SystemExecutor:
         if proc.returncode != 0:
             fifo.unlink(missing_ok=True)
             raise RuntimeError(f"tmux new-session failed: {proc.stderr.strip()}")
+        # Attach log capture before the bot starts producing output.
+        self.set_capture(bot, True)
         # The shim is blocked opening the FIFO for reading; writing the
         # launch configuration unblocks it and it execs into the bot. The
         # write waits for the reader with a bound, so a pane that died
@@ -352,6 +397,51 @@ class SystemExecutor:
         if procident.verify(identity):
             return True, None
         return False, self._pane_exit_code(bot)
+
+    # -- console / capture ---------------------------------------------------
+    def _capture_target(self, bot: str) -> Path:
+        return self.root / "bots" / bot / "logs" / "console.log"
+
+    def capture_state(self, bot: str) -> bool:
+        proc = self._tmux(bot, "display-message", "-p", "-t", "main", "#{pane_pipe}")
+        return proc.returncode == 0 and proc.stdout.strip() == "1"
+
+    def set_capture(self, bot: str, enabled: bool) -> None:
+        currently = self.capture_state(bot)
+        if enabled and not currently:
+            target = self._capture_target(bot)
+            proc = self._tmux(
+                bot, "pipe-pane", "-t", "main", f"cat >> {target}"
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"pipe-pane failed: {proc.stderr.strip()}")
+        elif not enabled and currently:
+            proc = self._tmux(bot, "pipe-pane", "-t", "main")
+            if proc.returncode != 0:
+                raise RuntimeError(f"pipe-pane close failed: {proc.stderr.strip()}")
+
+    def console_snapshot(self, bot: str) -> str:
+        proc = self._tmux(bot, "capture-pane", "-p", "-t", "main")
+        if proc.returncode != 0:
+            raise RuntimeError(f"capture-pane failed: {proc.stderr.strip()}")
+        return proc.stdout
+
+    def console_send(self, bot: str, text: str, enter: bool) -> None:
+        if text:
+            proc = self._tmux(bot, "send-keys", "-t", "main", "-l", "--", text)
+            if proc.returncode != 0:
+                raise RuntimeError(f"send-keys failed: {proc.stderr.strip()}")
+        if enter:
+            proc = self._tmux(bot, "send-keys", "-t", "main", "Enter")
+            if proc.returncode != 0:
+                raise RuntimeError(f"send-keys Enter failed: {proc.stderr.strip()}")
+
+    def console_resize(self, bot: str, cols: int, rows: int) -> None:
+        proc = self._tmux(
+            bot, "resize-pane", "-t", "main", "-x", str(cols), "-y", str(rows)
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"resize-pane failed: {proc.stderr.strip()}")
 
     def stop_bot(self, bot: str, identity: ProcessIdentity, grace: float) -> int:
         exit_code = self._pane_exit_code(bot)

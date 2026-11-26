@@ -6,16 +6,14 @@ rather than the regular CI matrix.
 """
 
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-import botmgr
 from botmgr import procident
-from botmgr.helperd import Helper, SystemExecutor
+from botmgr.helperd import Helper
 
 pytestmark = pytest.mark.skipif(
     os.geteuid() != 0, reason="helper integration tests require root"
@@ -47,39 +45,6 @@ def pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
-
-
-@pytest.fixture()
-def helper(tmp_path: Path) -> Helper:
-    # pytest's temp tree is owner-only; the bot users need traverse (x)
-    # permission on every ancestor of the test root to reach their folders.
-    for parent in (tmp_path, *tmp_path.parents):
-        if parent == Path("/tmp"):
-            break
-        parent.chmod(0o711)
-    # The bot users must be able to read the package (tmux config, launcher)
-    # and the fixture bots; the dev checkout lives under a private home, so
-    # stage world-readable copies here. Production installs system-wide.
-    staging = tmp_path / "staging"
-    package_src = Path(botmgr.__file__).parent
-    shutil.copytree(
-        package_src, staging / "botmgr", ignore=shutil.ignore_patterns("__pycache__")
-    )
-    shutil.copytree(Path(__file__).parent / "fixtures", staging / "fixtures")
-    for path in staging.rglob("*"):
-        path.chmod(0o755 if path.is_dir() else 0o644)
-    staging.chmod(0o755)
-    executor = SystemExecutor(tmp_path, package_dir=staging / "botmgr")
-    h = Helper(root=tmp_path, executor=executor)
-    h.fixtures_dir = staging / "fixtures"  # type: ignore[attr-defined]
-    yield h
-    for bot in (BOT_A, BOT_B):
-        subprocess.run(
-            ["su", "-s", "/bin/sh", f"bm-{bot}", "-c", f"tmux -L be-{bot} kill-server"],
-            capture_output=True,
-            check=False,
-        )
-        h.handle({"op": "delete_user", "bot": bot})
 
 
 def launch(helper: Helper, bot: str, script: str, env_text: str = "") -> dict:

@@ -1,0 +1,104 @@
+from pathlib import Path
+
+from botmgr.logfiles import rotate_copytruncate
+from botmgr.logtail import MAX_LINE_BYTES, LogFollower, decode_line, read_tail
+
+
+def test_follower_reads_new_lines(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_text("first\n")
+    follower = LogFollower(log)
+    assert follower.poll() == ["first"]
+    assert follower.poll() == []
+    with open(log, "a") as fh:
+        fh.write("second\nthird\n")
+    assert follower.poll() == ["second", "third"]
+    follower.close()
+
+
+def test_follower_waits_for_complete_lines(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_text("partial")
+    follower = LogFollower(log)
+    assert follower.poll() == []
+    with open(log, "a") as fh:
+        fh.write(" done\n")
+    assert follower.poll() == ["partial done"]
+    follower.close()
+
+
+def test_follower_survives_copytruncate(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_text("before\n")
+    follower = LogFollower(log)
+    assert follower.poll() == ["before"]
+    with open(log, "r+b") as fh:
+        fh.truncate(0)
+    with open(log, "a") as fh:
+        fh.write("after\n")
+    assert follower.poll() == ["after"]
+    follower.close()
+
+
+def test_follower_caps_overlong_line_and_recovers(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_bytes(b"x" * (MAX_LINE_BYTES + 5000) + b"\nnext\n")
+    follower = LogFollower(log)
+    lines = follower.poll()
+    assert len(lines) == 2
+    assert lines[0].endswith("[truncated]")
+    assert lines[1] == "next"
+    follower.close()
+
+
+def test_follower_no_newline_flood_does_not_buffer_forever(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "console.log"
+    log.write_bytes(b"y" * (MAX_LINE_BYTES * 3))
+    follower = LogFollower(log)
+    lines = follower.poll()
+    assert len(lines) == 1
+    assert lines[0].endswith("[truncated]")
+    assert follower.poll() == []
+    follower.close()
+
+
+def test_decode_line_replaces_invalid_utf8() -> None:
+    assert decode_line(b"\xff\xfe") == "��"
+
+
+def test_read_tail(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_text("a\nb\nc\nd\n")
+    assert read_tail(log, 2) == ["c", "d"]
+    assert read_tail(log, 99) == ["a", "b", "c", "d"]
+    assert read_tail(tmp_path / "missing.log", 5) == []
+
+
+def test_rotate_copytruncate(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_text("x" * 100)
+    inode_before = log.stat().st_ino
+    assert rotate_copytruncate(log, max_bytes=50, generations=3) is True
+    assert log.read_text() == ""
+    assert log.stat().st_ino == inode_before
+    assert (tmp_path / "console.log.1").read_text() == "x" * 100
+
+
+def test_rotate_skips_small_files(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_text("small")
+    assert rotate_copytruncate(log, max_bytes=1000) is False
+    assert log.read_text() == "small"
+
+
+def test_rotate_shifts_generations(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    (tmp_path / "console.log.1").write_text("gen1")
+    (tmp_path / "console.log.2").write_text("gen2")
+    log.write_text("current")
+    assert rotate_copytruncate(log, max_bytes=1, generations=3) is True
+    assert (tmp_path / "console.log.1").read_text() == "current"
+    assert (tmp_path / "console.log.2").read_text() == "gen1"
+    assert (tmp_path / "console.log.3").read_text() == "gen2"

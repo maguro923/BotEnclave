@@ -33,6 +33,23 @@ class FakeExecutor:
         self.calls.append(("bot_status", (bot, identity)))
         return True, None
 
+    def set_capture(self, bot: str, enabled: bool) -> None:
+        self.calls.append(("set_capture", (bot, enabled)))
+
+    def capture_state(self, bot: str) -> bool:
+        self.calls.append(("capture_state", (bot,)))
+        return True
+
+    def console_snapshot(self, bot: str) -> str:
+        self.calls.append(("console_snapshot", (bot,)))
+        return "screen text"
+
+    def console_send(self, bot: str, text: str, enter: bool) -> None:
+        self.calls.append(("console_send", (bot, text, enter)))
+
+    def console_resize(self, bot: str, cols: int, rows: int) -> None:
+        self.calls.append(("console_resize", (bot, cols, rows)))
+
 
 @pytest.fixture()
 def helper(tmp_path: Path) -> tuple[Helper, FakeExecutor]:
@@ -184,3 +201,39 @@ def test_bot_status_happy_path(helper: tuple[Helper, FakeExecutor]) -> None:
     h, _ex = helper
     resp = h.handle({"op": "bot_status", "bot": "alpha", "identity": IDENT_JSON})
     assert resp == {"ok": True, "result": {"alive": True, "exit_code": None}}
+
+
+def test_set_capture_requires_boolean(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, ex = helper
+    resp = h.handle({"op": "set_capture", "bot": "alpha", "enabled": "yes"})
+    assert resp["ok"] is False
+    assert ex.calls == []
+    resp = h.handle({"op": "set_capture", "bot": "alpha", "enabled": False})
+    assert resp == {"ok": True, "result": {"enabled": False}}
+    assert ex.calls == [("set_capture", ("alpha", False))]
+
+
+def test_console_send_validates_text(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, ex = helper
+    assert h.handle({"op": "console_send", "bot": "alpha", "text": "x" * 4097})["ok"] is False
+    assert h.handle({"op": "console_send", "bot": "alpha", "text": "a\x00b"})["ok"] is False
+    assert h.handle({"op": "console_send", "bot": "alpha", "text": 42})["ok"] is False
+    assert ex.calls == []
+    resp = h.handle({"op": "console_send", "bot": "alpha", "text": "hello"})
+    assert resp == {"ok": True, "result": {"sent": 5}}
+    assert ex.calls == [("console_send", ("alpha", "hello", True))]
+
+
+def test_console_resize_validates_range(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, ex = helper
+    assert h.handle({"op": "console_resize", "bot": "alpha", "cols": 3, "rows": 24})["ok"] is False
+    assert h.handle({"op": "console_resize", "bot": "alpha", "cols": 80, "rows": 999})["ok"] is False
+    assert ex.calls == []
+    resp = h.handle({"op": "console_resize", "bot": "alpha", "cols": 80, "rows": 24})
+    assert resp == {"ok": True, "result": {"cols": 80, "rows": 24}}
+
+
+def test_console_snapshot(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, _ex = helper
+    resp = h.handle({"op": "console_snapshot", "bot": "alpha"})
+    assert resp == {"ok": True, "result": {"text": "screen text"}}
