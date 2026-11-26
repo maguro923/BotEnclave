@@ -132,11 +132,15 @@ class HelperClient:
         )
 
 
-def subprocess_transport(command: list[str], root: Path) -> Transport:
+def subprocess_transport(
+    command: list[str], root: Path, package_dir: Path | None = None
+) -> Transport:
     """Run the helper as a subprocess per request (dev / direct-root use)."""
 
     def transport(request: dict[str, Any]) -> dict[str, Any]:
         env = {**os.environ, "BOTENCLAVE_ROOT": str(root)}
+        if package_dir is not None:
+            env["BOTENCLAVE_PACKAGE_DIR"] = str(package_dir)
         proc = subprocess.run(
             command,
             input=json.dumps(request),
@@ -159,11 +163,15 @@ def subprocess_transport(command: list[str], root: Path) -> Transport:
     return transport
 
 
-def direct_transport(root: Path) -> Transport:
+def direct_transport(root: Path, package_dir: Path | None = None) -> Transport:
     """Transport that runs botmgr.helperd with the current interpreter."""
-    return subprocess_transport([sys.executable, "-m", "botmgr.helperd"], root)
+    return subprocess_transport(
+        [sys.executable, "-m", "botmgr.helperd"], root, package_dir
+    )
 
 
-def sudo_transport(helper_entry: str, root: Path) -> Transport:
+def sudo_transport(
+    helper_entry: str, root: Path, package_dir: Path | None = None
+) -> Transport:
     """Production transport: the root-owned helper entry point via sudo -n."""
-    return subprocess_transport(["sudo", "-n", helper_entry], root)
+    return subprocess_transport(["sudo", "-n", helper_entry], root, package_dir)

@@ -130,6 +130,16 @@ class BotStateMachine:
         index = min(self._failures_without_success - 1, len(BACKOFF_SCHEDULE) - 1)
         self._retry_at = now + BACKOFF_SCHEDULE[index]
 
+    def restore_running(self, now: float) -> None:
+        """Adopt a bot that was found still running after a manager restart
+        (reconcile). Supervision accounting restarts from the restore time:
+        the run's original start time is not recoverable, and pretending
+        otherwise would corrupt the crash statistics."""
+        if self._state is not BotState.STOPPED:
+            raise InvalidTransition(f"cannot restore from {self._state.value}")
+        self._state = BotState.RUNNING
+        self._started_at = now
+
     def tick(self, now: float) -> bool:
         """Advance time-based transitions. Returns True if a restart is due."""
         if self._state is BotState.BACKOFF and self._retry_at is not None and now >= self._retry_at:

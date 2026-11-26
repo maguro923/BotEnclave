@@ -37,6 +37,7 @@ def helper(tmp_path: Path) -> Helper:
     executor = SystemExecutor(tmp_path, package_dir=staging / "botmgr")
     h = Helper(root=tmp_path, executor=executor)
     h.fixtures_dir = staging / "fixtures"  # type: ignore[attr-defined]
+    h.package_dir = staging / "botmgr"  # type: ignore[attr-defined]
     yield h
     for bot in TEST_BOTS:
         subprocess.run(

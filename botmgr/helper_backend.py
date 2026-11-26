@@ -22,6 +22,9 @@ class HelperBackend:
         self._owners[(identity.pid, identity.start_time)] = bot_id
         return identity
 
+    def adopt(self, bot_id: str, identity: ProcessIdentity) -> None:
+        self._owners[(identity.pid, identity.start_time)] = bot_id
+
     def _bot_for(self, identity: ProcessIdentity) -> str:
         try:
             return self._owners[(identity.pid, identity.start_time)]

@@ -11,11 +11,15 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from botmgr.backend import Backend
 from botmgr.launcher import LaunchConfig
 from botmgr.procident import ProcessIdentity
 from botmgr.state import BotState, BotStateMachine
+
+if TYPE_CHECKING:
+    from botmgr.store import StateStore
 
 STOP_GRACE_SECONDS = 10.0
 
@@ -41,9 +45,11 @@ class Supervisor:
         self,
         backend: Backend,
         now_fn: Callable[[], float] = time.monotonic,
+        store: StateStore | None = None,
     ) -> None:
         self._backend = backend
         self._now = now_fn
+        self._store = store
         self._bots: dict[str, _BotEntry] = {}
         self.last_errors: dict[str, Exception] = {}
 
@@ -51,6 +57,39 @@ class Supervisor:
         if bot_id in self._bots:
             raise ValueError(f"bot already registered: {bot_id}")
         self._bots[bot_id] = _BotEntry(config)
+        if self._store is not None:
+            self._store.register_bot(bot_id, config)
+
+    def bot_ids(self) -> list[str]:
+        return sorted(self._bots)
+
+    def _persist(self, bot_id: str, entry: _BotEntry) -> None:
+        if self._store is not None:
+            self._store.save_state(bot_id, entry.machine.state, entry.identity)
+
+    def restore_running(
+        self, bot_id: str, config: LaunchConfig, identity: ProcessIdentity
+    ) -> None:
+        if bot_id not in self._bots:
+            self.register(bot_id, config)
+        entry = self._bots[bot_id]
+        entry.identity = identity
+        adopt = getattr(self._backend, "adopt", None)
+        if adopt is not None:
+            adopt(bot_id, identity)
+        entry.machine.restore_running(self._now())
+        self._persist(bot_id, entry)
+
+    def restore_exited(self, bot_id: str, config: LaunchConfig) -> None:
+        """Adopt a bot that died while the manager was down: count it as a
+        crash now so the normal backoff/attention rules apply."""
+        if bot_id not in self._bots:
+            self.register(bot_id, config)
+        entry = self._bots[bot_id]
+        now = self._now()
+        entry.machine.start(now)
+        entry.machine.mark_exited(now, exit_code=-1)
+        self._persist(bot_id, entry)
 
     def _entry(self, bot_id: str) -> _BotEntry:
         try:
@@ -75,6 +114,7 @@ class Supervisor:
             entry.machine.start(self._now())
             self._spawn(bot_id, entry)
         finally:
+            self._persist(bot_id, entry)
             entry.lock.release()
 
     def _spawn(self, bot_id: str, entry: _BotEntry) -> None:
@@ -101,6 +141,7 @@ class Supervisor:
                 entry.identity = None
                 entry.machine.mark_exited(self._now(), exit_code)
         finally:
+            self._persist(bot_id, entry)
             entry.lock.release()
 
     def tick(self) -> None:
@@ -124,6 +165,7 @@ class Supervisor:
             if exit_code is not None:
                 entry.identity = None
                 machine.mark_exited(now, exit_code)
+                self._persist(bot_id, entry)
                 return
         if machine.tick(now):
             try:
@@ -136,3 +178,4 @@ class Supervisor:
                 self.last_errors[bot_id] = exc
             else:
                 self.last_errors.pop(bot_id, None)
+            self._persist(bot_id, entry)

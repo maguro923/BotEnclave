@@ -536,7 +536,11 @@ def _signal_all(pids: set[int], sig: int) -> None:
 
 def main(argv: list[str]) -> int:
     root = Path(os.environ.get("BOTENCLAVE_ROOT", str(DEFAULT_ROOT)))
-    helper = Helper(root=root, executor=SystemExecutor(root))
+    package_dir_env = os.environ.get("BOTENCLAVE_PACKAGE_DIR")
+    package_dir = Path(package_dir_env) if package_dir_env else None
+    helper = Helper(
+        root=root, executor=SystemExecutor(root, package_dir=package_dir)
+    )
     raw = sys.stdin.read()
     try:
         request = json.loads(raw)

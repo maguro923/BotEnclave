@@ -27,3 +27,8 @@ class Backend(Protocol):
     def poll_exit(self, identity: ProcessIdentity) -> int | None:
         """Return the exit code if the process has ended, else None."""
         ...
+
+    # Backends may additionally provide adopt(bot_id, identity) -> None:
+    # register an already-running process the backend did not start in
+    # this process (reconcile after a manager restart) so that stop and
+    # poll_exit can address it. The supervisor calls it when present.

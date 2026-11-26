@@ -1,0 +1,82 @@
+"""Watchdog: the periodic supervision loop (PLAN sections 1.5 and 1.10).
+
+One step does, for every bot:
+- drive the supervisor (exit polling, due restarts);
+- re-attach log capture that fell off, unless private mode holds it off;
+- rotate the console log when it outgrows its budget;
+- sample resident memory and report bots over their RSS budget
+  (reporting only; acting on it is a policy decision surfaced as an event).
+
+The step returns human-readable event strings; the caller decides how to
+log or surface them. Nothing here blocks for long: every operation is a
+bounded helper call or a local file operation.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from botmgr import logfiles
+from botmgr.console import CaptureController
+from botmgr.helper import HelperClient
+from botmgr.state import BotState
+from botmgr.supervisor import Supervisor
+
+DEFAULT_RSS_LIMIT_BYTES = 512 * 1024 * 1024
+
+
+def read_rss_bytes(pid: int) -> int | None:
+    try:
+        text = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("VmRSS:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                return int(parts[1]) * 1024
+    return None
+
+
+class Watchdog:
+    def __init__(
+        self,
+        supervisor: Supervisor,
+        client: HelperClient,
+        capture: CaptureController,
+        root: Path,
+        rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
+    ) -> None:
+        self._supervisor = supervisor
+        self._client = client
+        self._capture = capture
+        self._root = root
+        self._rss_limit = rss_limit_bytes
+
+    def step(self) -> list[str]:
+        events: list[str] = []
+        self._supervisor.tick()
+        for bot in self._supervisor.bot_ids():
+            state = self._supervisor.state(bot)
+            if state is BotState.RUNNING:
+                events.extend(self._check_running(bot))
+            log_path = self._root / "bots" / bot / "logs" / "console.log"
+            if logfiles.rotate_copytruncate(log_path):
+                events.append(f"{bot}: console log rotated")
+        return events
+
+    def _check_running(self, bot: str) -> list[str]:
+        events: list[str] = []
+        if not self._capture.private_active(bot):
+            was_on = self._client.capture_state(bot)
+            self._capture.ensure_capture(bot)
+            if not was_on:
+                events.append(f"{bot}: log capture re-attached")
+        identity = self._supervisor.identity(bot)
+        if identity is not None:
+            rss = read_rss_bytes(identity.pid)
+            if rss is not None and rss > self._rss_limit:
+                events.append(
+                    f"{bot}: RSS {rss} exceeds budget {self._rss_limit}"
+                )
+        return events
