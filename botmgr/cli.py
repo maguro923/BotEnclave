@@ -96,6 +96,91 @@ async def _setup_token(root: Path, regenerate: bool) -> str:
     return token
 
 
+def _systemd_command(args: argparse.Namespace) -> int:
+    import subprocess
+
+    from botmgr import systemd_units
+
+    root: Path = args.root
+    package_dir = (args.package_dir or Path(__file__).resolve().parent).resolve()
+    command = args.systemd_command
+    if command == "render-manager":
+        print(
+            systemd_units.render_manager_unit(
+                root,
+                args.manager_user,
+                package_dir,
+                host=args.host,
+                port=args.port,
+            )
+        )
+        return 0
+    if command == "render-bot":
+        use_credential = (root / "secrets" / f"{args.bot}.cred").exists()
+        print(
+            systemd_units.render_bot_unit(
+                args.bot, root, package_dir, use_credential=use_credential
+            )
+        )
+        return 0
+    if os.geteuid() != 0:
+        print("systemd install commands require root", file=sys.stderr)
+        return 1
+    if command == "install":
+        entry = Path(systemd_units.HELPER_ENTRY_PATH)
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text(
+            systemd_units.render_helper_entry(root, package_dir), encoding="utf-8"
+        )
+        entry.chmod(0o755)
+        print(f"wrote {entry}")
+        sudoers = Path("/etc/sudoers.d/botenclave")
+        sudoers.write_text(
+            systemd_units.render_sudoers(args.manager_user), encoding="utf-8"
+        )
+        sudoers.chmod(0o440)
+        print(f"wrote {sudoers}")
+        unit = Path("/etc/systemd/system") / systemd_units.MANAGER_UNIT
+        unit.write_text(
+            systemd_units.render_manager_unit(
+                root,
+                args.manager_user,
+                package_dir,
+                host=args.host,
+                port=args.port,
+            ),
+            encoding="utf-8",
+        )
+        print(f"wrote {unit}")
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        print(
+            "next: create the manager user if needed, then"
+            " `systemctl enable --now botenclave`"
+        )
+        return 0
+    if command == "install-bot":
+        use_credential = (root / "secrets" / f"{args.bot}.cred").exists()
+        unit = Path("/etc/systemd/system") / systemd_units.bot_unit_name(args.bot)
+        unit.write_text(
+            systemd_units.render_bot_unit(
+                args.bot,
+                root,
+                package_dir,
+                memory_max=args.memory_max,
+                cpu_quota=args.cpu_quota,
+                use_credential=use_credential,
+            ),
+            encoding="utf-8",
+        )
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        print(
+            f"wrote {unit} (credential: {'yes' if use_credential else 'no'});"
+            " start the bot from the panel or CLI as usual"
+        )
+        return 0
+    return 2
+
+
 def _print_report(report: ReconcileReport) -> None:
     for bot in report.adopted_running:
         print(f"reconcile: {bot} still running, adopted")
@@ -138,17 +223,92 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--transport", choices=("direct", "sudo"), default="direct")
     p.add_argument("--no-cookie-secure", action="store_true")
+    p.add_argument(
+        "--bot-runtime", choices=("helper", "systemd"), default="helper"
+    )
     p = sub.add_parser("unlock")
     p.add_argument("email")
     p = sub.add_parser("setup-token")
     p.add_argument("--regenerate", action="store_true")
 
+    p = sub.add_parser("audit")
+    audit_sub = p.add_subparsers(dest="audit_command", required=True)
+    audit_sub.add_parser("verify")
+    p_purge = audit_sub.add_parser("purge")
+    p_purge.add_argument("--days", type=int, default=180)
+
+    p = sub.add_parser("systemd")
+    systemd_sub = p.add_subparsers(dest="systemd_command", required=True)
+    p = systemd_sub.add_parser("render-manager")
+    p.add_argument("--manager-user", default="botenclave")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p = systemd_sub.add_parser("render-bot")
+    p.add_argument("bot")
+    p = systemd_sub.add_parser("install")
+    p.add_argument("--manager-user", default="botenclave")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p = systemd_sub.add_parser("install-bot")
+    p.add_argument("bot")
+    p.add_argument("--memory-max", default="512M")
+    p.add_argument("--cpu-quota", default="100%")
+
+    p = sub.add_parser("backup")
+    p.add_argument("dest_dir", type=Path)
+    p.add_argument("--include-releases", action="store_true")
+    p = sub.add_parser("restore")
+    p.add_argument("archive", type=Path)
+    p.add_argument("--force", action="store_true")
+
     args = parser.parse_args(argv)
+    if args.command == "backup":
+        from botmgr.backup import BackupError, create_backup
+
+        try:
+            archive = create_backup(
+                args.root, args.dest_dir, include_releases=args.include_releases
+            )
+        except BackupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"backup written: {archive}")
+        return 0
+    if args.command == "restore":
+        from botmgr.backup import BackupError, restore_backup
+
+        try:
+            restored = restore_backup(args.archive, args.root, force=args.force)
+        except BackupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"restored {len(restored)} files into {args.root}")
+        return 0
+    if args.command == "systemd":
+        return _systemd_command(args)
+    if args.command == "audit":
+        from botmgr.audit import AuditLog
+
+        log = AuditLog(args.root / "audit.log")
+        if args.audit_command == "verify":
+            ok = log.verify_chain()
+            count = len(log.read_all())
+            print(f"audit chain {'OK' if ok else 'BROKEN'} ({count} entries)")
+            return 0 if ok else 1
+        dropped = log.purge(time.time() - args.days * 86400)
+        print(f"purged {dropped} entries older than {args.days} days")
+        return 0
     if args.command == "serve":
         import uvicorn
 
         from botmgr.app import AppConfig, create_app
 
+        if args.no_cookie_secure:
+            print(
+                "warning: session cookies will not require HTTPS; do not"
+                " expose this instance directly (PLAN 3.2)",
+                file=sys.stderr,
+            )
         app = create_app(
             AppConfig(
                 root=args.root,
@@ -156,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
                 cookie_secure=not args.no_cookie_secure,
                 transport=args.transport,
                 package_dir=args.package_dir,
+                bot_runtime=args.bot_runtime,
             )
         )
         uvicorn.run(app, host=args.host, port=args.port)

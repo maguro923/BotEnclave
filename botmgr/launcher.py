@@ -16,6 +16,7 @@ import os
 import resource
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 
 DENIED_ENV_KEYS = frozenset(
     {
@@ -134,6 +135,11 @@ class LaunchConfig:
     # the merged env to data/.env for dotenv-style bots (PLAN 3.3 / 2.8).
     use_credential: bool = False
     dotenv_mode: bool = False
+    # systemd mode: the bot runs under its own unit (LoadCredentialEncrypted
+    # delivers secrets; launch.json must stay secret-free, which the
+    # helper enforces via secret_keys).
+    via_unit: bool = False
+    secret_keys: tuple[str, ...] = ()
 
 
 def config_from_json(raw: bytes) -> LaunchConfig:
@@ -204,17 +210,39 @@ def run(config: LaunchConfig) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python -m botmgr.launcher <launch-fifo>", file=sys.stderr)
-        return 2
-    fifo_path = argv[1]
-    with open(fifo_path, "rb") as fh:
-        raw = fh.read()
-    # The configuration is single-use; remove the FIFO as soon as it has
-    # been read so nothing can replay or re-read it.
-    os.unlink(fifo_path)
-    run(config_from_json(raw))
-    return 0  # pragma: no cover - run() execs on success
+    if len(argv) == 2 and argv[1] != "--files":
+        fifo_path = argv[1]
+        with open(fifo_path, "rb") as fh:
+            raw = fh.read()
+        # The configuration is single-use; remove the FIFO as soon as it
+        # has been read so nothing can replay or re-read it.
+        os.unlink(fifo_path)
+        run(config_from_json(raw))
+        return 0  # pragma: no cover - run() execs on success
+    if len(argv) in (3, 4) and argv[1] == "--files":
+        # systemd mode (PLAN 3.3): the non-secret launch configuration
+        # comes from a file the manager wrote, and the secret env comes
+        # from the unit's credentials directory (decrypted by PID 1 via
+        # LoadCredentialEncrypted). The env file is read once, here, and
+        # never copied anywhere by the shim.
+        config = config_from_json(Path(argv[2]).read_bytes())
+        if len(argv) == 4:
+            env = parse_env_text(Path(argv[3]).read_text(encoding="utf-8"))
+            config = LaunchConfig(
+                command=config.command,
+                cwd=config.cwd,
+                env={**config.env, **env},
+                rlimit_nofile=config.rlimit_nofile,
+                rlimit_nproc=config.rlimit_nproc,
+            )
+        run(config)
+        return 0  # pragma: no cover - run() execs on success
+    print(
+        "usage: python -m botmgr.launcher <launch-fifo> | "
+        "--files <launch.json> [env-file]",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":

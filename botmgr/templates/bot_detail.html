@@ -350,7 +350,13 @@ logWs.onmessage = (event) => {
   while (logEl.childNodes.length > 2000) logEl.removeChild(logEl.firstChild);
   logEl.scrollTop = logEl.scrollHeight;
 };
-const term = new Terminal({ convertEol: false, fontSize: 13 });
+const term = new Terminal({
+  convertEol: false,
+  fontSize: 13,
+  // Bot output is untrusted: never let it turn into clickable links
+  // (OSC 8) or follow non-http protocols (PLAN 3.5).
+  linkHandler: { activate: () => undefined, allowNonHttpProtocols: false },
+});
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open(document.getElementById('terminal'));

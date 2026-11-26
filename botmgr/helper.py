@@ -66,10 +66,16 @@ class HelperClient:
             rlimits["nproc"] = config.rlimit_nproc
         if rlimits:
             launch["rlimits"] = rlimits
-        if config.use_credential:
+        if config.via_unit:
+            launch["via_unit"] = True
+        elif config.use_credential:
+            # In unit mode the credential is delivered by PID 1, not by
+            # the helper, so the flag must not trigger a helper merge.
             launch["use_credential"] = True
         if config.dotenv_mode:
             launch["dotenv_mode"] = True
+        if config.secret_keys:
+            launch["secret_keys"] = list(config.secret_keys)
         result = self._call({"op": "start_bot", "bot": bot, "launch": launch})
         identity = result["identity"]
         if not isinstance(identity, dict):
@@ -121,6 +127,10 @@ class HelperClient:
 
     def ensure_layout(self, bot: str) -> None:
         self._call({"op": "ensure_layout", "bot": bot})
+
+    def disk_usage(self, bot: str) -> int:
+        result = self._call({"op": "disk_usage", "bot": bot})
+        return int(result["bytes"])
 
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, Any]]:
         result = self._call(

@@ -20,6 +20,7 @@ import hmac
 import json
 import secrets as stdlib_secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from botmgr.audit import AuditLog
+from botmgr.audit import AuditLog, AuditMirror
 from botmgr.auth.deps import AuthBundle, build_auth, init_auth_db
 from botmgr.auth.models import User
 from botmgr.auth.routes import build_auth_router, setup_token_path
@@ -60,6 +61,7 @@ from botmgr.helper_backend import HelperBackend
 from botmgr.helperd import BOT_NAME_RE
 from botmgr.launcher import LaunchConfig
 from botmgr.logtail import LogFollower, read_tail
+from botmgr.masking import mask_lines
 from botmgr.reconcile import reconcile
 from botmgr.secrets import decrypt_text, encrypt_text, load_or_create_fernet
 from botmgr.store import StateStore, StoredBot
@@ -86,6 +88,11 @@ class AppConfig:
     helper_entry: str = "/usr/local/lib/botenclave/helper"
     package_dir: Path | None = None
     transport_override: Transport | None = field(default=None, repr=False)
+    # Guest quotas (PLAN 3.2); admins are exempt.
+    guest_max_bots: int = 5
+    guest_max_disk_bytes: int = 1 << 30
+    audit_retention_days: int = 180
+    bot_runtime: str = "helper"
 
 
 def authorize(user: User, stored: StoredBot | None) -> StoredBot:
@@ -145,11 +152,20 @@ def create_app(config: AppConfig) -> FastAPI:
     client = HelperClient(transport)
     secrets_service = SecretsService(root, store)
     supervisor = Supervisor(
-        HelperBackend(client), store=store, env_provider=secrets_service.resolve
+        HelperBackend(client, via_unit=config.bot_runtime == "systemd"),
+        store=store,
+        env_provider=secrets_service.resolve,
     )
     capture = CaptureController(client)
-    watchdog = Watchdog(supervisor, client, capture, root)
-    audit = AuditLog(root / "audit.log")
+    usage: dict[str, int] = {}
+    watchdog = Watchdog(
+        supervisor,
+        client,
+        capture,
+        root,
+        usage_sink=lambda bot, n: usage.__setitem__(bot, n),
+    )
+    audit = AuditLog(root / "audit.log", mirror=AuditMirror(root / "botmgr.db"))
     deploy_service = DeployService(root, store, supervisor, client)
     webhook_secrets = WebhookSecrets(root)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -164,6 +180,35 @@ def create_app(config: AppConfig) -> FastAPI:
         stored = await run_in_threadpool(store.get_bot, bot_id)
         return authorize(user, stored)
 
+    def guest_quota_error(user: User, *, adding_bot: bool = False) -> str | None:
+        """Guest quotas (PLAN 3.2): bot count and total disk usage.
+        Admins are exempt; memory/RSS stay advisory by design."""
+        if user.is_superuser:
+            return None
+        owned = [b for b in store.load_all() if b.owner_id == user.id]
+        if adding_bot and len(owned) >= config.guest_max_bots:
+            return f"bot quota reached ({config.guest_max_bots} bots)"
+        total = sum(usage.get(b.bot_id, 0) for b in owned)
+        if total >= config.guest_max_disk_bytes:
+            return "disk quota exceeded"
+        return None
+
+    def mask_for(bot: str) -> list[str]:
+        try:
+            resolution = secrets_service.resolve(bot)
+        except SecretsError:
+            return []
+        if not resolution.env:
+            return []
+        return list(resolution.env.values())
+
+    def visible_audit(user: User) -> list[dict[str, object]]:
+        entries = audit.read_all()
+        if user.is_superuser:
+            return entries
+        own = {b.bot_id for b in store.load_all() if b.owner_id == user.id}
+        return [e for e in entries if e.get("target") in own]
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         lock_fd = open(root / "manager.lock", "a+")  # noqa: SIM115, ASYNC230
@@ -174,6 +219,13 @@ def create_app(config: AppConfig) -> FastAPI:
                 "another BotEnclave manager is already running for this root"
             ) from None
         await init_auth_db(bundle)
+        if config.audit_retention_days > 0:
+            dropped = await run_in_threadpool(
+                audit.purge,
+                time.time() - config.audit_retention_days * 86400,
+            )
+            if dropped:
+                audit.record("system", "audit.purge", "", f"dropped={dropped}")
         report = await run_in_threadpool(reconcile, supervisor, store, client, capture)
         for bot in report.adopted_running:
             audit.record("system", "reconcile.adopted", bot)
@@ -247,7 +299,12 @@ def create_app(config: AppConfig) -> FastAPI:
         if origin and urlparse(origin).netloc != websocket.headers.get("host", ""):
             raise HTTPException(status_code=403, detail="origin mismatch")
 
-    app.include_router(build_auth_router(bundle, service))
+    app.include_router(build_auth_router(bundle, service, audit_sink=audit.record))
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        # Minimal unauthenticated liveness signal (PLAN 5.2).
+        return {"status": "ok"}
     app.mount(
         "/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static"
     )
@@ -331,6 +388,7 @@ def create_app(config: AppConfig) -> FastAPI:
                 "state": supervisor.state(b.bot_id).value,
                 "secret_backend": b.secret_backend,
                 "dotenv_mode": b.dotenv_mode,
+                "disk_bytes": usage.get(b.bot_id),
             }
             for b in bots
         ]
@@ -351,6 +409,9 @@ def create_app(config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail="command must be a non-empty list")
         if store.get_bot(name) is not None:
             raise HTTPException(status_code=409, detail="bot already exists")
+        quota = guest_quota_error(user, adding_bot=True)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
 
         def do_create() -> None:
             client.create_user(name)
@@ -393,6 +454,9 @@ def create_app(config: AppConfig) -> FastAPI:
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
     ) -> dict[str, str]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
         try:
             await run_in_threadpool(supervisor.start, stored.bot_id)
         except BusyError:
@@ -423,7 +487,7 @@ def create_app(config: AppConfig) -> FastAPI:
     ) -> dict[str, object]:
         path = root / "bots" / stored.bot_id / "logs" / "console.log"
         tail = await run_in_threadpool(read_tail, path, max(1, min(lines, 2000)))
-        return {"lines": tail}
+        return {"lines": mask_lines(tail, mask_for(stored.bot_id))}
 
     # -- environment / secrets (values are never re-displayed, PLAN 3.3) -------
     @app.get("/api/bots/{bot_id}/env")
@@ -501,6 +565,9 @@ def create_app(config: AppConfig) -> FastAPI:
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
     ) -> dict[str, object]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
         bot = stored.bot_id
         url = body.get("url")
         branch = body.get("branch")
@@ -534,6 +601,9 @@ def create_app(config: AppConfig) -> FastAPI:
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
     ) -> dict[str, object]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
         bot = stored.bot_id
         filename = Path(file.filename or "upload.zip").name
         tmp_dir = root / "tmp"
@@ -588,13 +658,17 @@ def create_app(config: AppConfig) -> FastAPI:
         log = await run_in_threadpool(
             deploy_service.deploy_log, stored.bot_id, release_id
         )
-        return {"log": log}
+        masked = mask_lines(log.splitlines(), mask_for(stored.bot_id))
+        return {"log": "\n".join(masked)}
 
     @app.post("/api/bots/{bot_id}/rollback")
     async def rollback(
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
     ) -> dict[str, object]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
         bot = stored.bot_id
         try:
             result = await run_in_threadpool(deploy_service.rollback, bot)
@@ -831,6 +905,23 @@ def create_app(config: AppConfig) -> FastAPI:
         threading.Thread(target=run_deploy, daemon=True).start()
         return JSONResponse({"status": "accepted"}, status_code=202)
 
+    # -- audit viewing (admin: all; guests: their own bots only, PLAN 3.6) -------
+    @app.get("/api/audit")
+    async def audit_list(
+        limit: int = 200, user: User = Depends(current_user)  # type: ignore[arg-type]
+    ) -> list[dict[str, object]]:
+        entries = visible_audit(user)
+        return entries[-max(1, min(limit, 1000)) :][::-1]
+
+    @app.get("/audit", response_class=HTMLResponse)
+    async def audit_page(
+        request: Request, user: User = Depends(current_user)  # type: ignore[arg-type]
+    ) -> HTMLResponse:
+        entries = visible_audit(user)[-200:][::-1]
+        return templates.TemplateResponse(
+            request, "audit.html", {"user": user, "entries": entries}
+        )
+
     # -- admin: user deletion with bot transfer --------------------------------
     @app.delete("/admin/users/{user_id}")
     async def delete_user(
@@ -900,14 +991,19 @@ def create_app(config: AppConfig) -> FastAPI:
         await websocket.accept()
         path = root / "bots" / stored.bot_id / "logs" / "console.log"
         follower = LogFollower(path)
+        values = mask_for(stored.bot_id)
         try:
             initial = await run_in_threadpool(read_tail, path, 200)
-            await websocket.send_text(json.dumps({"lines": initial}))
+            await websocket.send_text(
+                json.dumps({"lines": mask_lines(initial, values)})
+            )
             while True:
                 lines = follower.poll()
                 if lines:
                     await asyncio.wait_for(
-                        websocket.send_text(json.dumps({"lines": lines})),
+                        websocket.send_text(
+                            json.dumps({"lines": mask_lines(lines, values)})
+                        ),
                         timeout=10,
                     )
                 await asyncio.sleep(0.4)

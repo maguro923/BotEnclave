@@ -125,3 +125,12 @@ def build_auth(root: Path, secret: str, cookie_secure: bool = True) -> AuthBundl
 async def init_auth_db(bundle: AuthBundle) -> None:
     async with bundle.engine.begin() as conn:  # type: ignore[attr-defined]
         await conn.run_sync(Base.metadata.create_all)
+        # create_all does not add columns to existing tables; the auth
+        # package owns its migrations, kept deliberately tiny.
+        rows = await conn.exec_driver_sql("PRAGMA table_info(user)")
+        columns = {row[1] for row in rows.fetchall()}
+        for name in ("backup_codes", "temp_pw_issues"):
+            if name not in columns:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE user ADD COLUMN {name} TEXT DEFAULT '[]'"
+                )

@@ -100,6 +100,7 @@ class Executor(Protocol):
     def console_resize(self, bot: str, cols: int, rows: int) -> None: ...
     def console_clear_history(self, bot: str) -> None: ...
     def ensure_layout(self, bot: str) -> None: ...
+    def disk_usage(self, bot: str) -> int: ...
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]: ...
     def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]: ...
     def file_write(self, bot: str, zone: str, rel: str, content: str) -> None: ...
@@ -207,6 +208,10 @@ class Helper:
             bot = validate_bot_name(request.get("bot"))
             self.executor.ensure_layout(bot)
             return {"ready": True}
+        if op == "disk_usage":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            return {"bytes": self.executor.disk_usage(bot)}
         if op in (
             "file_list",
             "file_read",
@@ -447,10 +452,60 @@ class SystemExecutor:
             )
         return parse_env_text(proc.stdout)
 
+    def _unit_name(self, bot: str) -> str:
+        return f"botenclave-bot-{bot}.service"
+
+    def _start_via_unit(
+        self, bot: str, launch: dict[str, object]
+    ) -> ProcessIdentity:
+        """systemd mode (PLAN 3.3): write the secret-free launch.json and
+        start the bot's unit. PID 1 decrypts the credential; the helper
+        never sees plaintext here, and refuses to write one to disk."""
+        if launch.get("secret_keys"):
+            raise RuntimeError(
+                "this bot's secret backend cannot be delivered through a"
+                " systemd unit; switch the bot to the systemd-creds backend"
+            )
+        unit = self._unit_name(bot)
+        unit_path = Path("/etc/systemd/system") / unit
+        if not unit_path.exists():
+            raise RuntimeError(
+                f"unit {unit} is not installed; run"
+                f" `botmgr systemd install-bot {bot}` first"
+            )
+        bot_dir = self.root / "bots" / bot
+        payload: dict[str, object] = {
+            key: launch[key]
+            for key in ("command", "cwd", "env", "env_text", "rlimits")
+            if key in launch
+        }
+        if launch.get("dotenv_mode"):
+            payload["dotenv_mode"] = True
+        target = bot_dir / "launch.json"
+        tmp = bot_dir / f".launch.json.tmp-{os.urandom(4).hex()}"
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        _run(["chown", f"root:{username_for(bot)}", str(tmp)])
+        tmp.chmod(0o640)
+        os.replace(tmp, target)
+        proc = _run(["systemctl", "start", unit])
+        if proc.returncode != 0:
+            raise RuntimeError(f"systemctl start failed: {proc.stderr.strip()}")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            pid = self._pane_pid(bot)
+            if pid is not None:
+                identity = procident.read_identity(pid)
+                if identity is not None:
+                    return identity
+            time.sleep(0.2)
+        raise RuntimeError("bot unit started but no pane appeared")
+
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity:
         user = username_for(bot)
         data_dir = self.root / "bots" / bot / "data"
         launch = dict(launch)
+        if launch.pop("via_unit", False):
+            return self._start_via_unit(bot, launch)
         env_obj = launch.get("env")
         env: dict[str, str] = dict(env_obj) if isinstance(env_obj, dict) else {}
         if launch.pop("use_credential", False):
@@ -571,6 +626,17 @@ class SystemExecutor:
         if proc.returncode != 0:
             raise RuntimeError(f"clear-history failed: {proc.stderr.strip()}")
 
+    def disk_usage(self, bot: str) -> int:
+        total = 0
+        base = self.root / "bots" / bot
+        for dirpath, _dirnames, filenames in os.walk(base, followlinks=False):
+            for name in filenames:
+                try:
+                    total += os.lstat(os.path.join(dirpath, name)).st_size
+                except OSError:
+                    continue
+        return total
+
     # -- file management (PLAN 2.8; validation lives in botmgr.fileops) ------
     def _bot_root(self, bot: str) -> Path:
         return self.root / "bots" / bot
@@ -623,6 +689,11 @@ class SystemExecutor:
                 _signal_all({pid}, 9)
             exit_code = self._pane_exit_code(bot)
         self._tmux(bot, "kill-session", "-t", "main")
+        # If the bot also has a systemd unit, stop it so the unit's main
+        # process (botunit) exits instead of lingering as an empty unit.
+        unit_path = Path("/etc/systemd/system") / self._unit_name(bot)
+        if unit_path.exists():
+            _run(["systemctl", "stop", self._unit_name(bot)])
         return exit_code if exit_code is not None else -1
 
 

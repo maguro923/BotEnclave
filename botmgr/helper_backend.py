@@ -13,11 +13,16 @@ from botmgr.procident import ProcessIdentity
 
 
 class HelperBackend:
-    def __init__(self, client: HelperClient) -> None:
+    def __init__(self, client: HelperClient, via_unit: bool = False) -> None:
         self._client = client
+        self._via_unit = via_unit
         self._owners: dict[tuple[int, int], str] = {}
 
     def start(self, bot_id: str, config: LaunchConfig) -> ProcessIdentity:
+        if self._via_unit:
+            import dataclasses
+
+            config = dataclasses.replace(config, via_unit=True)
         identity = self._client.start_bot(bot_id, config)
         self._owners[(identity.pid, identity.start_time)] = bot_id
         return identity

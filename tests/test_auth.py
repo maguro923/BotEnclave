@@ -225,3 +225,61 @@ def test_users_router_is_read_only(
         405,
     )
     assert admin.delete(f"/users/{me.json()['id']}").status_code in (404, 405)
+
+
+def test_backup_codes_single_use(app_and_service) -> None:  # type: ignore[no-untyped-def]
+    import pyotp as _pyotp
+
+    app, _service = app_and_service
+    admin = admin_client(app)
+    # Enable TOTP for the admin.
+    enroll = admin.post("/auth/totp/enroll")
+    secret = enroll.json()["secret"]
+    code = _pyotp.TOTP(secret).now()
+    assert admin.post("/auth/totp/confirm", json={"code": code}).status_code == 200
+    resp = admin.post("/auth/totp/backup-codes")
+    assert resp.status_code == 200, resp.text
+    codes = resp.json()["codes"]
+    assert len(codes) == 8
+    assert admin.get("/auth/totp/backup-codes/count").json()["remaining"] == 8
+    # A fresh client can sign in with a backup code instead of a TOTP code.
+    guest = make_client(app)
+    resp = guest.post(
+        "/auth/login",
+        json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "totp_code": codes[0]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert admin.get("/auth/totp/backup-codes/count").json()["remaining"] == 7
+    # The same code cannot be used twice.
+    guest2 = make_client(app)
+    resp = guest2.post(
+        "/auth/login",
+        json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "totp_code": codes[0]},
+    )
+    assert resp.status_code == 400
+    # Regenerating invalidates the previous set.
+    admin.post("/auth/totp/backup-codes")
+    guest3 = make_client(app)
+    resp = guest3.post(
+        "/auth/login",
+        json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD, "totp_code": codes[1]},
+    )
+    assert resp.status_code == 400
+
+
+def test_temp_password_rate_limit(app_and_service) -> None:  # type: ignore[no-untyped-def]
+    import asyncio as _asyncio
+
+    from botmgr.auth.service import TempPasswordRateLimited
+
+    app, service = app_and_service
+    admin = admin_client(app)
+    invited = admin.post("/admin/users/invite", json={"email": GUEST_EMAIL})
+    user_id = invited.json()["id"]
+    for _ in range(5):
+        resp = admin.post(f"/admin/users/{user_id}/temp-password")
+        assert resp.status_code == 200
+    resp = admin.post(f"/admin/users/{user_id}/temp-password")
+    assert resp.status_code == 429
+    with __import__("pytest").raises(TempPasswordRateLimited):
+        _asyncio.run(service.issue_temp_password(user_id))

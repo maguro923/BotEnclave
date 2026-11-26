@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Audit log</h1>
+<p style="color: #8b949e;">{% if user.is_superuser %}All recorded operations.{% else %}Operations on your bots.{% endif %}
+Entries are hash-chained and mirrored; the chain can be verified with <code>botmgr audit verify</code>.</p>
+<table>
+  <thead><tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+    <tr>
+      <td>{{ e.ts | int }}</td>
+      <td>{{ e.actor }}</td>
+      <td>{{ e.action }}</td>
+      <td>{{ e.target }}</td>
+      <td>{{ e.detail }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

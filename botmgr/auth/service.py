@@ -13,7 +13,9 @@ and the CLI share exactly the same code path.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import secrets
 import time
 from types import SimpleNamespace
@@ -31,6 +33,12 @@ from botmgr.secrets import decrypt_text, encrypt_text
 LOCKOUT_THRESHOLD = 5
 LOCKOUT_SECONDS = 900
 TOTP_ISSUER = "BotEnclave"
+TEMP_PW_MAX_PER_HOUR = 5
+BACKUP_CODE_COUNT = 8
+
+
+class TempPasswordRateLimited(Exception):
+    """Too many temporary passwords issued for one user in an hour."""
 
 
 class AccountLocked(Exception):
@@ -163,11 +171,62 @@ class AuthService:
             user = await db.get(user_id)
             if user is None:
                 raise ValueError(f"no such user: {user_id}")
+            now = time.time()
+            issues = [
+                ts
+                for ts in json.loads(user.temp_pw_issues or "[]")
+                if now - float(ts) < 3600
+            ]
+            if len(issues) >= TEMP_PW_MAX_PER_HOUR:
+                raise TempPasswordRateLimited(
+                    f"temporary password issued too often for user {user_id}"
+                )
+            issues.append(now)
+            user.temp_pw_issues = json.dumps(issues)
             user.hashed_password = self._passwords.hash(temp_password)
             user.must_change_password = True
             await session.commit()
         await self.revoke_all_tokens(user_id)
         return temp_password
+
+    # -- TOTP backup codes (hashed, single-use; PLAN 3.2) ----------------------
+    async def generate_backup_codes(self, user: User) -> list[str]:
+        codes = [
+            f"{secrets.token_hex(2)}-{secrets.token_hex(2)}"
+            for _ in range(BACKUP_CODE_COUNT)
+        ]
+        hashes = [hashlib.sha256(code.encode()).hexdigest() for code in codes]
+        async with self._bundle.session_factory() as session:
+            db = self._user_db(session)
+            stored = await db.get(user.id)
+            if stored is None:
+                raise ValueError(f"no such user: {user.id}")
+            stored.backup_codes = json.dumps(hashes)
+            await session.commit()
+        return codes
+
+    async def consume_backup_code(self, user: User, code: str) -> bool:
+        digest = hashlib.sha256(code.strip().lower().encode()).hexdigest()
+        async with self._bundle.session_factory() as session:
+            db = self._user_db(session)
+            stored = await db.get(user.id)
+            if stored is None:
+                return False
+            hashes: list[str] = json.loads(stored.backup_codes or "[]")
+            if digest not in hashes:
+                return False
+            hashes.remove(digest)
+            stored.backup_codes = json.dumps(hashes)
+            await session.commit()
+            return True
+
+    async def backup_code_count(self, user: User) -> int:
+        async with self._bundle.session_factory() as session:
+            db = self._user_db(session)
+            stored = await db.get(user.id)
+            if stored is None:
+                return 0
+            return len(json.loads(stored.backup_codes or "[]"))
 
     async def change_password(
         self, user: User, current_password: str, new_password: str

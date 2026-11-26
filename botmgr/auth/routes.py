@@ -11,6 +11,8 @@ policy and deletion needs the app layer's bot-transfer step first
 from __future__ import annotations
 
 import hmac
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ from botmgr.auth.schemas import (
     UserRead,
     UserUpdate,
 )
-from botmgr.auth.service import AccountLocked, AuthService
+from botmgr.auth.service import AccountLocked, AuthService, TempPasswordRateLimited
 
 SETUP_TOKEN_FILENAME = "setup-token"
 
@@ -50,27 +52,74 @@ def user_read(user: User) -> UserRead:
     )
 
 
-def build_auth_router(bundle: AuthBundle, service: AuthService) -> APIRouter:
+AuditSink = Callable[[str, str, str, str], None]
+
+LOGIN_RATE_LIMIT = 30
+LOGIN_RATE_WINDOW = 300.0
+
+
+class _LoginRateLimiter:
+    """In-process attempt budget per (client, email). The account
+    lockout (5 failures) is the real barrier; this blunts distributed
+    password spraying across many accounts from one client."""
+
+    def __init__(self) -> None:
+        self._hits: dict[str, list[float]] = {}
+
+    def allow(self, key: str) -> bool:
+        now = time.time()
+        hits = [t for t in self._hits.get(key, []) if now - t < LOGIN_RATE_WINDOW]
+        if len(hits) >= LOGIN_RATE_LIMIT:
+            self._hits[key] = hits
+            return False
+        hits.append(now)
+        self._hits[key] = hits
+        return True
+
+
+def build_auth_router(
+    bundle: AuthBundle,
+    service: AuthService,
+    audit_sink: AuditSink | None = None,
+) -> APIRouter:
     router = APIRouter()
     current_user = bundle.current_user
     current_admin = bundle.current_admin
+    limiter = _LoginRateLimiter()
+
+    def audit(actor: str, action: str, target: str = "", detail: str = "") -> None:
+        if audit_sink is not None:
+            audit_sink(actor, action, target, detail)
 
     @router.post("/auth/login")
     async def login(
         body: LoginRequest,
+        request: Request,
         strategy: DatabaseStrategy[User, int, Any] = Depends(bundle.get_strategy),  # type: ignore[arg-type]
     ) -> Response:
+        client_host = request.client.host if request.client else "unknown"
+        if not limiter.allow(f"{client_host}|{body.email.lower()}"):
+            raise HTTPException(status_code=429, detail="too many login attempts")
         try:
             user = await service.authenticate(body.email, body.password)
         except AccountLocked:
+            audit(body.email, "login.locked")
             raise HTTPException(status_code=423, detail="account locked") from None
         if user is None or not user.is_active:
+            audit(body.email, "login.failure")
             raise HTTPException(status_code=400, detail="LOGIN_BAD_CREDENTIALS")
         if user.totp_enabled:
             if body.totp_code is None:
                 raise HTTPException(status_code=401, detail="totp_required")
-            if not await service.totp_verify_and_consume(user, body.totp_code):
+            ok = await service.totp_verify_and_consume(user, body.totp_code)
+            if not ok:
+                # A backup code is accepted in place of a TOTP code and
+                # is consumed by the attempt (single-use, PLAN 3.2).
+                ok = await service.consume_backup_code(user, body.totp_code)
+            if not ok:
+                audit(body.email, "login.failure", detail="totp")
                 raise HTTPException(status_code=400, detail="LOGIN_BAD_TOTP")
+        audit(body.email, "login.success")
         login_response = await bundle.backend.login(strategy, user)
         response = JSONResponse(
             {
@@ -133,6 +182,22 @@ def build_auth_router(bundle: AuthBundle, service: AuthService) -> APIRouter:
             raise HTTPException(status_code=400, detail="invalid code")
         return {"status": "ok"}
 
+    @router.post("/auth/totp/backup-codes")
+    async def totp_backup_codes(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+    ) -> dict[str, object]:
+        if not user.totp_enabled:
+            raise HTTPException(status_code=400, detail="totp is not enabled")
+        codes = await service.generate_backup_codes(user)
+        audit(user.email, "totp.backup_codes")
+        return {"codes": codes}
+
+    @router.get("/auth/totp/backup-codes/count")
+    async def totp_backup_codes_count(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+    ) -> dict[str, int]:
+        return {"remaining": await service.backup_code_count(user)}
+
     # -- admin user management ------------------------------------------------
     @router.get("/admin/users", response_model=list[UserRead])
     async def list_users(admin: User = Depends(current_admin)) -> list[UserRead]:  # type: ignore[arg-type]
@@ -145,6 +210,7 @@ def build_auth_router(bundle: AuthBundle, service: AuthService) -> APIRouter:
         if await service.get_by_email(body.email) is not None:
             raise HTTPException(status_code=400, detail="email already registered")
         user, temp_password = await service.invite(body.email, body.is_admin)
+        audit(admin.email, "user.invite", user.email)
         return {"id": user.id, "email": user.email, "temp_password": temp_password}
 
     @router.post("/admin/users/{user_id}/temp-password")
@@ -153,8 +219,13 @@ def build_auth_router(bundle: AuthBundle, service: AuthService) -> APIRouter:
     ) -> dict[str, object]:
         try:
             password = await service.issue_temp_password(user_id)
+        except TempPasswordRateLimited:
+            raise HTTPException(
+                status_code=429, detail="temporary password issued too often"
+            ) from None
         except ValueError:
             raise HTTPException(status_code=404, detail="no such user") from None
+        audit(admin.email, "user.temp_password", detail=f"user_id={user_id}")
         return {"id": user_id, "temp_password": password}
 
     @router.post("/admin/users/{user_id}/disable")
@@ -169,6 +240,7 @@ def build_auth_router(bundle: AuthBundle, service: AuthService) -> APIRouter:
                 status_code=400, detail="cannot disable the last admin"
             )
         await service.set_active(user_id, False)
+        audit(admin.email, "user.disable", target.email)
         return {"status": "ok"}
 
     @router.post("/admin/users/{user_id}/enable")
@@ -178,6 +250,7 @@ def build_auth_router(bundle: AuthBundle, service: AuthService) -> APIRouter:
         if await service.get_user(user_id) is None:
             raise HTTPException(status_code=404, detail="no such user")
         await service.set_active(user_id, True)
+        audit(admin.email, "user.enable", detail=f"user_id={user_id}")
         return {"status": "ok"}
 
     # -- first-run setup ---------------------------------------------------------

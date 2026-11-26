@@ -554,3 +554,81 @@ def test_files_api_and_confinement(
         ).status_code
         == 404
     )
+
+
+def test_log_masking_and_audit_visibility(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    guest_a = invite_and_login(admin, client, GUEST_A)
+    guest_b = invite_and_login(admin, client, GUEST_B)
+    create_bot(guest_a, "alpha")
+    guest_a.put(
+        "/api/bots/alpha/env",
+        json={"env": {"DISCORD_TOKEN": "mask-me-token-123"}, "backend": "fernet"},
+    )
+    log_path = root / "bots" / "alpha" / "logs" / "console.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        "starting with mask-me-token-123\nordinary line\n", encoding="utf-8"
+    )
+    resp = guest_a.get("/api/bots/alpha/log")
+    lines = resp.json()["lines"]
+    assert all("mask-me-token-123" not in line for line in lines)
+    assert any("•••" in line for line in lines)
+    # Audit: the guest sees entries for their own bots (bot.create was
+    # recorded), the other guest sees none of them, the admin sees all
+    # including logins.
+    audit_a = guest_a.get("/api/audit").json()
+    assert any(
+        e["action"] == "bot.create" and e["target"] == "alpha" for e in audit_a
+    )
+    audit_b = guest_b.get("/api/audit").json()
+    assert all(e["target"] != "alpha" for e in audit_b)
+    audit_admin = admin.get("/api/audit").json()
+    assert any(e["action"] == "login.success" for e in audit_admin)
+    assert admin.get("/healthz").json() == {"status": "ok"}
+
+
+def test_guest_bot_quota(tmp_path: Path) -> None:
+    fake = FakeHelper(tmp_path)
+    app = create_app(
+        AppConfig(
+            root=tmp_path,
+            secret="test-secret",
+            cookie_secure=False,
+            transport_override=fake,
+            guest_max_bots=1,
+        )
+    )
+    with TestClient(app) as client:
+        admin = setup_admin(client, tmp_path)
+        guest_a = invite_and_login(admin, client, GUEST_A)
+        create_bot(guest_a, "only")
+        resp = guest_a.post(
+            "/api/bots", json={"name": "second", "command": ["python3", "x.py"]}
+        )
+        assert resp.status_code == 403
+        # The admin is exempt from the guest quota.
+        create_bot(admin, "adminbot")
+
+
+def test_xss_log_content_stays_inert(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    log_path = root / "bots" / "alpha" / "logs" / "console.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = "<script>alert('xss')</script>"
+    log_path.write_text(payload + "\n", encoding="utf-8")
+    # The API serves log content as JSON data (the page inserts it with
+    # textContent only), so markup arrives verbatim but inert.
+    resp = admin.get("/api/bots/alpha/log")
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["lines"] == [payload]
+    # Server-rendered pages never embed raw log content.
+    page = admin.get("/bots/alpha")
+    assert payload not in page.text

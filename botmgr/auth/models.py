@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from fastapi_users_db_sqlalchemy import SQLAlchemyBaseUserTable
 from fastapi_users_db_sqlalchemy.access_token import SQLAlchemyBaseAccessTokenTable
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
 
 
@@ -29,6 +29,10 @@ class User(SQLAlchemyBaseUserTable[int], Base):
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[float | None] = mapped_column(Float, default=None)
+    # JSON list of SHA-256 hashes of unused TOTP backup codes (PLAN 3.2).
+    backup_codes: Mapped[str] = mapped_column(Text, default="[]")
+    # JSON list of recent temporary-password issue timestamps (rate limit).
+    temp_pw_issues: Mapped[str] = mapped_column(Text, default="[]")
 
 
 class AccessToken(SQLAlchemyBaseAccessTokenTable[int], Base):

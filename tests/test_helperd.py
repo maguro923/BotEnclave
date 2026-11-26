@@ -56,6 +56,10 @@ class FakeExecutor:
     def ensure_layout(self, bot: str) -> None:
         self.calls.append(("ensure_layout", (bot,)))
 
+    def disk_usage(self, bot: str) -> int:
+        self.calls.append(("disk_usage", (bot,)))
+        return 12345
+
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]:
         self.calls.append(("file_list", (bot, zone, rel)))
         return [{"name": "a.txt", "kind": "file", "size": 3}]

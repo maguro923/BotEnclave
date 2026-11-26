@@ -169,6 +169,9 @@ class Supervisor:
                 env={**config.env, **resolution.env},
                 use_credential=resolution.use_credential,
                 dotenv_mode=resolution.dotenv_mode,
+                secret_keys=tuple(
+                    sorted(set(resolution.env) - set(entry.config.env))
+                ),
             )
         try:
             entry.identity = self._backend.start(bot_id, config)

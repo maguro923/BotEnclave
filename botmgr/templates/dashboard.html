@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Your bots</h1>
+{% if user.is_superuser and not user.totp_enabled %}
+<p class="notice">You are an administrator without two-factor authentication.
+Set up TOTP under <a href="/account">Account</a> — an admin account is the
+keys to every bot on this host.</p>
+{% endif %}
 <div class="card">
   <h2>Add a bot</h2>
   <form id="create-form">

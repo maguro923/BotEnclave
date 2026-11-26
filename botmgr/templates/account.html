@@ -37,6 +37,34 @@
   <span id="totp-result"></span>
   {% endif %}
 </div>
+{% if user.totp_enabled %}
+<div class="card">
+  <h2>Backup codes</h2>
+  <p>Single-use codes that can sign you in when your authenticator is
+  unavailable. Generating a new set invalidates the old one. Remaining:
+  <span id="backup-count">…</span></p>
+  <button id="backup-generate">Generate new backup codes</button>
+  <pre id="backup-codes" style="font-size: 1.1em;"></pre>
+</div>
+<script>
+async function loadBackupCount() {
+  const resp = await fetch('/auth/totp/backup-codes/count');
+  if (resp.ok) {
+    const data = await resp.json();
+    document.getElementById('backup-count').textContent = data.remaining;
+  }
+}
+loadBackupCount();
+document.getElementById('backup-generate').onclick = async () => {
+  const resp = await apiFetch('/auth/totp/backup-codes', { method: 'POST' });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { alert('Failed: ' + (data.detail || resp.status)); return; }
+  document.getElementById('backup-codes').textContent =
+    'Save these now — they are shown once:\n' + data.codes.join('\n');
+  loadBackupCount();
+};
+</script>
+{% endif %}
 <script>
 document.getElementById('pw-form').addEventListener('submit', async (e) => {
   e.preventDefault();

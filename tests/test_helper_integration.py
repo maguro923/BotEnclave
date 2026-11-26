@@ -276,3 +276,140 @@ def test_systemd_creds_injection_via_helper(helper: Helper) -> None:
     helper.handle(
         {"op": "stop_bot", "bot": BOT_A, "identity": identity, "grace_seconds": 2}
     )
+
+
+def _systemd_available() -> bool:
+    if os.geteuid() != 0:
+        return False
+    proc = subprocess.run(
+        ["systemctl", "is-system-running"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout.strip() in ("running", "degraded")
+
+
+@pytest.mark.skipif(not _systemd_available(), reason="systemd is not running")
+def test_bot_via_systemd_unit_with_credential(helper: Helper) -> None:
+    """The LoadCredentialEncrypted path end to end: PID 1 decrypts, the
+    manager and the helper never see the plaintext (PLAN 3.3)."""
+    from botmgr import systemd_units
+    from botmgr.envstore import SecretsService
+    from botmgr.store import StateStore
+
+    bot = BOT_A
+    unit_name = systemd_units.bot_unit_name(bot)
+    unit_path = Path("/etc/systemd/system") / unit_name
+    helper.handle({"op": "create_user", "bot": bot})
+    store = StateStore(helper.root / "botmgr.db")
+    store.register_bot(
+        bot,
+        LaunchConfig(
+            ("python3", "x"), str(helper.root / "bots" / bot / "data"), {}
+        ),
+    )
+    SecretsService(helper.root, store).set_env(
+        bot, {"MY_TOKEN": "unit-secret-7"}, "systemd-creds"
+    )
+    unit_path.write_text(
+        systemd_units.render_bot_unit(
+            bot,
+            helper.root,
+            helper.package_dir,  # type: ignore[attr-defined]
+            use_credential=True,
+        ),
+        encoding="utf-8",
+    )
+    try:
+        verify = subprocess.run(
+            ["systemd-analyze", "verify", str(unit_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert verify.returncode == 0, verify.stderr
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        fixtures = helper.fixtures_dir  # type: ignore[attr-defined]
+        launch_payload = {
+            "command": ["/usr/bin/python3", str(fixtures / "envdump.py")],
+            "cwd": str(helper.root / "bots" / bot / "data"),
+            "env": {},
+            "via_unit": True,
+        }
+        resp = helper.handle(
+            {"op": "start_bot", "bot": bot, "launch": launch_payload}
+        )
+        assert resp["ok"] is True, resp
+        identity = resp["result"]["identity"]
+        dump = helper.root / "bots" / bot / "data" / "envdump.txt"
+        assert wait_until(lambda: dump.exists())
+        assert dump.read_text(encoding="utf-8") == "unit-secret-7"
+        # launch.json carries no secret values.
+        launch_json = (helper.root / "bots" / bot / "launch.json").read_text()
+        assert "unit-secret-7" not in launch_json
+        # The console path still works against the unit's tmux server.
+        resp = helper.handle({"op": "console_snapshot", "bot": bot})
+        assert resp["ok"] is True
+        resp = helper.handle(
+            {
+                "op": "stop_bot",
+                "bot": bot,
+                "identity": identity,
+                "grace_seconds": 2,
+            }
+        )
+        assert resp["ok"] is True
+
+        def inactive() -> bool:
+            proc = subprocess.run(
+                ["systemctl", "is-active", unit_name],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return proc.stdout.strip() in ("inactive", "failed")
+
+        assert wait_until(inactive)
+    finally:
+        subprocess.run(
+            ["systemctl", "stop", unit_name], capture_output=True, check=False
+        )
+        unit_path.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+
+
+def test_watchdog_reports_eater_over_rss_budget(helper: Helper) -> None:
+    from botmgr.console import CaptureController
+    from botmgr.helper import HelperClient, direct_transport
+    from botmgr.helper_backend import HelperBackend
+    from botmgr.launcher import LaunchConfig
+    from botmgr.supervisor import Supervisor
+    from botmgr.watchdog import Watchdog
+
+    helper.handle({"op": "create_user", "bot": BOT_A})
+    fixtures = helper.fixtures_dir  # type: ignore[attr-defined]
+    client = HelperClient(direct_transport(helper.root, helper.package_dir))  # type: ignore[attr-defined]
+    supervisor = Supervisor(HelperBackend(client))
+    supervisor.register(
+        BOT_A,
+        LaunchConfig(
+            ("/usr/bin/python3", str(fixtures / "eater.py"), "64"),
+            str(helper.root / "bots" / BOT_A / "data"),
+            {},
+        ),
+    )
+    supervisor.start(BOT_A)
+    watchdog = Watchdog(
+        supervisor,
+        client,
+        CaptureController(client),
+        helper.root,
+        rss_limit_bytes=10 * 1024 * 1024,
+    )
+    try:
+        assert wait_until(
+            lambda: any("RSS" in e for e in watchdog.step()), timeout=20
+        )
+    finally:
+        supervisor.stop(BOT_A)
