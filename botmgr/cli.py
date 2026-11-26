@@ -42,6 +42,8 @@ class Runtime:
 def build_runtime(root: Path, package_dir: Path | None = None) -> Runtime:
     from botmgr.envstore import SecretsService
 
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o711)  # bot users traverse the root to reach their folders
     store = StateStore(root / "botmgr.db")
     client = HelperClient(direct_transport(root, package_dir))
     supervisor = Supervisor(

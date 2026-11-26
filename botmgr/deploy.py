@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -182,6 +183,26 @@ def _unwrap_single_dir(dest: Path) -> None:
         inner.rmdir()
 
 
+def _publish_permissions(paths: list[Path], bot: str) -> None:
+    """Make a built release readable/executable by the bot's group only
+    (PLAN 2.4: manager-owned 0750/0640). A private umask on the manager
+    would otherwise leave the venv unusable by the bot user."""
+    try:
+        gid = pwd.getpwnam(f"bm-{bot}").pw_gid
+    except KeyError:
+        return  # no dedicated OS user (test/dev layouts): nothing to do
+    for base in paths:
+        for dirpath, _dirnames, filenames in os.walk(base):
+            dir_path = Path(dirpath)
+            os.chown(dir_path, -1, gid)
+            dir_path.chmod(0o750)
+            for name in filenames:
+                file_path = dir_path / name
+                os.chown(file_path, -1, gid)
+                mode = file_path.stat().st_mode
+                file_path.chmod(0o750 if mode & 0o111 else 0o640)
+
+
 def build_release(job: dict[str, object]) -> dict[str, object]:
     root = Path(str(job["root"]))
     bot = str(job["bot"])
@@ -230,6 +251,7 @@ def build_release(job: dict[str, object]) -> dict[str, object]:
             )
         else:
             log.write("no requirements.txt; venv left bare\n")
+        _publish_permissions([release_dir, venv_dir], bot)
     return {"release_id": release_id, "entry": entry}
 
 

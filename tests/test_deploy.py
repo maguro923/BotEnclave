@@ -223,3 +223,33 @@ def test_git_deploy_via_daemon(
         root / "bots" / "alpha" / "releases" / result.release_id / "bot.py"
     )
     assert deployed.read_text(encoding="utf-8") == BOT_PY
+
+
+def test_publish_permissions_group_access(tmp_path: Path) -> None:
+    import os
+    import pwd
+    from types import SimpleNamespace
+
+    from botmgr.deploy import _publish_permissions
+
+    base = tmp_path / "release"
+    (base / "bin").mkdir(parents=True)
+    script = base / "bin" / "python"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o700)
+    plain = base / "bot.py"
+    plain.write_text("x", encoding="utf-8")
+    plain.chmod(0o600)
+    real = pwd.getpwnam
+    import botmgr.deploy as deploy_mod
+
+    deploy_mod.pwd = SimpleNamespace(  # type: ignore[attr-defined]
+        getpwnam=lambda name: SimpleNamespace(pw_gid=os.getgid())
+    )
+    try:
+        _publish_permissions([base], "alpha")
+    finally:
+        deploy_mod.pwd = real  # type: ignore[attr-defined]
+    assert base.stat().st_mode & 0o777 == 0o750
+    assert script.stat().st_mode & 0o777 == 0o750  # executables stay executable
+    assert plain.stat().st_mode & 0o777 == 0o640

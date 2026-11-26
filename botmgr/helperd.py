@@ -531,6 +531,11 @@ class SystemExecutor:
             f"PYTHONPATH={package_parent} exec /usr/bin/python3"
             f" -m botmgr.launcher {fifo}"
         )
+        # A leftover session can only be a zombie: the supervisor calls
+        # start only for bots it believes are stopped, and a live one
+        # would have been adopted by reconcile instead. Clear it so a
+        # crashed predecessor cannot block the start forever.
+        self._tmux(bot, "kill-session", "-t", "main")
         # The server reads botmgr/tmux.conf at start (via -f in _tmux), so
         # default-shell and remain-on-exit already apply to this first pane.
         proc = self._tmux(
@@ -548,26 +553,31 @@ class SystemExecutor:
         if proc.returncode != 0:
             fifo.unlink(missing_ok=True)
             raise RuntimeError(f"tmux new-session failed: {proc.stderr.strip()}")
-        # Attach log capture before the bot starts producing output.
-        self.set_capture(bot, True)
-        # The shim is blocked opening the FIFO for reading; writing the
-        # launch configuration unblocks it and it execs into the bot. The
-        # write waits for the reader with a bound, so a pane that died
-        # before the shim started cannot hang the helper.
-        payload = json.dumps(launch).encode()
         try:
-            _write_fifo(fifo, payload, timeout=10.0)
-        except (OSError, RuntimeError) as exc:
+            # Attach log capture before the bot starts producing output.
+            self.set_capture(bot, True)
+            # The shim is blocked opening the FIFO for reading; writing
+            # the launch configuration unblocks it and it execs into the
+            # bot. The write waits for the reader with a bound, so a pane
+            # that died before the shim started cannot hang the helper.
+            payload = json.dumps(launch).encode()
+            try:
+                _write_fifo(fifo, payload, timeout=10.0)
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError(f"writing launch FIFO failed: {exc}") from exc
+            pid = self._pane_pid(bot)
+            if pid is None:
+                raise RuntimeError("could not determine pane pid")
+            identity = procident.read_identity(pid)
+            if identity is None:
+                raise RuntimeError("pane process vanished during start")
+            return identity
+        except Exception:
+            # Any failure after the session exists must not leak the
+            # session or the (possibly secret-bearing) FIFO.
             self._tmux(bot, "kill-session", "-t", "main")
             fifo.unlink(missing_ok=True)
-            raise RuntimeError(f"writing launch FIFO failed: {exc}") from exc
-        pid = self._pane_pid(bot)
-        if pid is None:
-            raise RuntimeError("could not determine pane pid")
-        identity = procident.read_identity(pid)
-        if identity is None:
-            raise RuntimeError("pane process vanished during start")
-        return identity
+            raise
 
     def bot_status(
         self, bot: str, identity: ProcessIdentity

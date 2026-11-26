@@ -140,6 +140,10 @@ def assert_bot_routes_guarded(
 def create_app(config: AppConfig) -> FastAPI:
     root = config.root
     root.mkdir(parents=True, exist_ok=True)
+    # Bot users must be able to traverse the deployment root to reach
+    # their own folders (the same reason bots/ itself is 0711, PLAN 2.4);
+    # a private umask would otherwise make every start fail.
+    root.chmod(0o711)
     bundle: AuthBundle = build_auth(root, config.secret, config.cookie_secure)
     service = AuthService(bundle)
     store = StateStore(root / "botmgr.db")
