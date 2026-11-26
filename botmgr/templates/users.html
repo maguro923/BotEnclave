@@ -1,39 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Users</h1>
+<h1>{{ t('users.title') }}</h1>
 <div class="card">
-  <h2>Invite a user</h2>
+  <h2>{{ t('users.invite') }}</h2>
   <form id="invite-form">
-    <input type="email" id="invite-email" placeholder="Email" required>
-    <button type="submit">Invite</button>
+    <input type="email" id="invite-email" placeholder="{{ t('users.email') }}" required>
+    <button type="submit">{{ t('users.invite_btn') }}</button>
     <span id="invite-result"></span>
   </form>
-  <p style="color: #8b949e;">The invited user gets a one-time temporary password, shown once
-  here. Share it with them out of band; they must change it at first login.</p>
+  <p class="muted">{{ t('users.invite_note') }}</p>
 </div>
 <table>
-  <thead><tr><th>Email</th><th>Role</th><th>Active</th><th>2FA</th><th></th></tr></thead>
+  <thead><tr><th>{{ t('users.email') }}</th><th>{{ t('users.username') }}</th><th>{{ t('users.role') }}</th><th>{{ t('users.active') }}</th><th>{{ t('users.2fa') }}</th><th></th></tr></thead>
   <tbody>
   {% for u in users %}
     <tr>
       <td>{{ u.email }}</td>
-      <td>{{ 'admin' if u.is_superuser else 'guest' }}</td>
-      <td>{{ 'yes' if u.is_active else 'no' }}</td>
-      <td>{{ 'on' if u.totp_enabled else 'off' }}</td>
+      <td>{{ u.username or '' }}</td>
+      <td>{{ t('users.admin') if u.is_superuser else t('users.guest') }}</td>
+      <td>{{ t('users.yes') if u.is_active else t('users.no') }}</td>
+      <td>{{ t('users.on') if u.totp_enabled else t('users.off') }}</td>
       <td>
-        <button class="secondary" data-temp="{{ u.id }}">Temp password</button>
+        <button class="secondary" data-temp="{{ u.id }}">{{ t('users.temp_pw') }}</button>
         {% if u.is_active %}
-        <button class="secondary" data-disable="{{ u.id }}">Disable</button>
+        <button class="secondary" data-disable="{{ u.id }}">{{ t('users.disable') }}</button>
         {% else %}
-        <button class="secondary" data-enable="{{ u.id }}">Enable</button>
+        <button class="secondary" data-enable="{{ u.id }}">{{ t('users.enable') }}</button>
         {% endif %}
-        <button class="danger" data-delete="{{ u.id }}">Delete…</button>
+        <button class="danger" data-delete="{{ u.id }}">{{ t('users.delete') }}</button>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
-<p id="action-result" style="color: #d29922;"></p>
+<p id="action-result" class="warn"></p>
 <script>
 const result = document.getElementById('action-result');
 document.getElementById('invite-form').addEventListener('submit', async (e) => {
@@ -45,7 +45,7 @@ document.getElementById('invite-form').addEventListener('submit', async (e) => {
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) { result.textContent = data.detail || resp.status; return; }
   document.getElementById('invite-result').textContent =
-    'Temporary password for ' + data.email + ': ' + data.temp_password + ' (shown once)';
+    window.t('users.temp_for').replace('{email}', data.email).replace('{pw}', data.temp_password);
   setTimeout(() => location.reload(), 4000);
 });
 document.querySelectorAll('button[data-temp]').forEach((btn) => {
@@ -53,7 +53,7 @@ document.querySelectorAll('button[data-temp]').forEach((btn) => {
     const resp = await apiFetch('/admin/users/' + btn.dataset.temp + '/temp-password', { method: 'POST' });
     const data = await resp.json().catch(() => ({}));
     result.textContent = resp.ok
-      ? 'New temporary password for ' + data.email + ': ' + data.temp_password + ' (shown once)'
+      ? window.t('users.new_temp_for').replace('{email}', data.email).replace('{pw}', data.temp_password)
       : (data.detail || resp.status);
   };
 });
@@ -71,7 +71,7 @@ document.querySelectorAll('button[data-enable]').forEach((btn) => {
 });
 document.querySelectorAll('button[data-delete]').forEach((btn) => {
   btn.onclick = async () => {
-    const mode = confirm('Transfer this user\'s bots to you? OK = transfer, Cancel = delete bots too')
+    const mode = confirm(window.t('users.transfer_confirm'))
       ? 'transfer' : 'delete';
     const resp = await apiFetch('/admin/users/' + btn.dataset.delete + '?mode=' + mode, { method: 'DELETE' });
     if (!resp.ok) {

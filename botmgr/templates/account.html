@@ -1,37 +1,48 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Account</h1>
+<h1>{{ t('account.title') }}</h1>
 {% if request.query_params.get('must_change') %}
-<p class="notice">You signed in with a temporary password. Change it now.</p>
+<p class="notice">{{ t('account.must_change') }}</p>
 {% endif %}
 <div class="card">
-  <h2>Change password</h2>
+  <h2>{{ t('account.username') }}</h2>
+  <form id="username-form">
+    <p><input type="text" id="username" value="{{ user.username or '' }}" placeholder="{{ t('account.username') }}">
+      <button type="submit">{{ t('account.username_save') }}</button>
+      <span id="username-result"></span></p>
+    <p class="muted">{{ t('account.username_note') }}</p>
+  </form>
+</div>
+<div class="card">
+  <h2>{{ t('account.change_pw') }}</h2>
   <form id="pw-form">
-    <p><input type="password" id="current" placeholder="Current password" required></p>
-    <p><input type="password" id="new" placeholder="New password (10+ characters)" required></p>
-    <button type="submit">Change password</button>
+    <p class="pw-row"><input type="password" id="current" placeholder="{{ t('account.current_pw') }}" required>
+      <button type="button" class="secondary" data-pw-toggle="current" onclick="togglePw(this)">{{ t('common.show') }}</button></p>
+    <p class="pw-row"><input type="password" id="new" placeholder="{{ t('account.new_pw') }}" required>
+      <button type="button" class="secondary" data-pw-toggle="new" onclick="togglePw(this)">{{ t('common.show') }}</button></p>
+    <button type="submit">{{ t('account.change_pw_btn') }}</button>
     <span id="pw-result"></span>
   </form>
 </div>
 <div class="card">
-  <h2>Two-factor authentication (TOTP)</h2>
+  <h2>{{ t('account.totp') }}</h2>
   {% if user.totp_enabled %}
-  <p>2FA is <strong>on</strong>.</p>
+  <p>{{ t('account.totp_on') }}</p>
   <form id="totp-disable-form">
-    <input type="text" id="totp-disable-code" placeholder="Current one-time code" required>
-    <button class="danger" type="submit">Disable 2FA</button>
+    <input type="text" id="totp-disable-code" placeholder="{{ t('account.totp_code') }}" required>
+    <button class="danger" type="submit">{{ t('account.totp_disable') }}</button>
     <span id="totp-result"></span>
   </form>
   {% else %}
-  <p>2FA is <strong>off</strong>.</p>
-  <button id="totp-start">Set up 2FA</button>
+  <p>{{ t('account.totp_off') }}</p>
+  <button id="totp-start">{{ t('account.totp_setup') }}</button>
   <div id="totp-enroll" hidden>
-    <p>Add this secret to your authenticator app, then enter a code to confirm:</p>
+    <p>{{ t('account.totp_enroll_note') }}</p>
     <p><code id="totp-secret"></code></p>
-    <p id="totp-uri" style="word-break: break-all; color: #8b949e;"></p>
+    <p id="totp-uri" style="word-break: break-all;" class="muted"></p>
     <form id="totp-confirm-form">
-      <input type="text" id="totp-confirm-code" placeholder="One-time code" required>
-      <button type="submit">Confirm</button>
+      <input type="text" id="totp-confirm-code" placeholder="{{ t('account.totp_code_ph') }}" required>
+      <button type="submit">{{ t('account.totp_confirm') }}</button>
     </form>
   </div>
   <span id="totp-result"></span>
@@ -39,11 +50,10 @@
 </div>
 {% if user.totp_enabled %}
 <div class="card">
-  <h2>Backup codes</h2>
-  <p>Single-use codes that can sign you in when your authenticator is
-  unavailable. Generating a new set invalidates the old one. Remaining:
+  <h2>{{ t('account.backup') }}</h2>
+  <p>{{ t('account.backup_note') }}
   <span id="backup-count">…</span></p>
-  <button id="backup-generate">Generate new backup codes</button>
+  <button id="backup-generate">{{ t('account.backup_generate') }}</button>
   <pre id="backup-codes" style="font-size: 1.1em;"></pre>
 </div>
 <script>
@@ -58,14 +68,25 @@ loadBackupCount();
 document.getElementById('backup-generate').onclick = async () => {
   const resp = await apiFetch('/auth/totp/backup-codes', { method: 'POST' });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) { alert('Failed: ' + (data.detail || resp.status)); return; }
+  if (!resp.ok) { alert(window.t('common.failed') + ': ' + (data.detail || resp.status)); return; }
   document.getElementById('backup-codes').textContent =
-    'Save these now — they are shown once:\n' + data.codes.join('\n');
+    window.t('account.backup_save_now') + '\n' + data.codes.join('\n');
   loadBackupCount();
 };
 </script>
 {% endif %}
 <script>
+document.getElementById('username-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const resp = await apiFetch('/auth/username', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: document.getElementById('username').value }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  document.getElementById('username-result').textContent = resp.ok
+    ? window.t('common.saved') : window.t('common.failed') + ': ' + (data.detail || resp.status);
+  if (resp.ok) setTimeout(() => location.reload(), 600);
+});
 document.getElementById('pw-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const resp = await apiFetch('/auth/change-password', {
@@ -76,8 +97,8 @@ document.getElementById('pw-form').addEventListener('submit', async (e) => {
     }),
   });
   document.getElementById('pw-result').textContent = resp.ok
-    ? 'Changed. Please log in again.'
-    : 'Failed: ' + resp.status;
+    ? window.t('account.changed')
+    : window.t('account.failed') + ': ' + resp.status;
   if (resp.ok) setTimeout(() => location.href = '/login', 1000);
 });
 const startBtn = document.getElementById('totp-start');
@@ -95,7 +116,7 @@ if (confirmForm) confirmForm.addEventListener('submit', async (e) => {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: document.getElementById('totp-confirm-code').value }),
   });
-  document.getElementById('totp-result').textContent = resp.ok ? '2FA enabled.' : 'Invalid code.';
+  document.getElementById('totp-result').textContent = resp.ok ? window.t('account.totp_enabled_msg') : window.t('account.invalid_code');
   if (resp.ok) setTimeout(() => location.reload(), 800);
 });
 const disableForm = document.getElementById('totp-disable-form');
@@ -105,7 +126,7 @@ if (disableForm) disableForm.addEventListener('submit', async (e) => {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: document.getElementById('totp-disable-code').value }),
   });
-  document.getElementById('totp-result').textContent = resp.ok ? '2FA disabled.' : 'Invalid code.';
+  document.getElementById('totp-result').textContent = resp.ok ? window.t('account.totp_disabled_msg') : window.t('account.invalid_code');
   if (resp.ok) setTimeout(() => location.reload(), 800);
 });
 </script>

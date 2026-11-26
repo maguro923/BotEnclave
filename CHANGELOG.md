@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Changed: the self-signed TLS certificate is now short-lived —
+  31-day validity, renewed roughly monthly. When 7 days or less
+  remain (checked at startup and daily while running) a fresh key
+  pair replaces both files atomically, with the address list
+  recomputed; a failed renewal keeps the old pair serving and is
+  retried, never taking the panel down. Under systemd the manager
+  restarts itself to apply a renewal (the manager unit is now
+  `Restart=always`); elsewhere the new pair applies at the next
+  restart. Certificates issued before this change (multi-year
+  validity) are replaced once at startup, so existing installs
+  converge on the monthly cycle.
+- Added: usernames. The first-run setup registers a username next
+  to the email address, it can be changed under Account, and it is
+  shown in the header and the user list. Email remains the login
+  identifier.
+- Added: panel languages — English and Japanese. The language is
+  chosen at first-run setup and can be changed at any time by an
+  administrator under the new Settings page; it applies to the
+  whole panel.
+- Added: password confirmation on the setup form (a mismatch is an
+  error), show/hide buttons on the password fields of the login,
+  setup and account forms, a light/dark theme toggle (light by
+  default, remembered per browser), and the service name in the
+  header of every page, including login and setup.
+
 - Fixed: a malformed `access.toml` (for example an unquoted IP
   address) made the manager exit and systemd restart it in a loop,
   taking the panel down entirely — including on loopback. The

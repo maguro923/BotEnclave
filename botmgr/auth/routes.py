@@ -29,10 +29,16 @@ from botmgr.auth.schemas import (
     LoginRequest,
     SetupRequest,
     TotpCodeRequest,
+    UsernameRequest,
     UserRead,
     UserUpdate,
 )
-from botmgr.auth.service import AccountLocked, AuthService, TempPasswordRateLimited
+from botmgr.auth.service import (
+    AccountLocked,
+    AuthService,
+    TempPasswordRateLimited,
+    validate_username,
+)
 
 SETUP_TOKEN_FILENAME = "setup-token"
 
@@ -50,6 +56,7 @@ def user_read(user: User) -> UserRead:
         is_verified=user.is_verified,
         must_change_password=user.must_change_password,
         totp_enabled=user.totp_enabled,
+        username=user.username,
     )
 
 
@@ -91,6 +98,7 @@ def build_auth_router(
     bundle: AuthBundle,
     service: AuthService,
     audit_sink: AuditSink | None = None,
+    language_sink: Callable[[str], None] | None = None,
 ) -> APIRouter:
     router = APIRouter()
     current_user = bundle.current_user
@@ -176,6 +184,17 @@ def build_auth_router(
         if not changed:
             raise HTTPException(status_code=400, detail="current password is wrong")
         return {"status": "ok"}
+
+    @router.post("/auth/username")
+    async def set_username(
+        body: UsernameRequest, user: User = Depends(current_user)  # type: ignore[arg-type]
+    ) -> dict[str, str]:
+        try:
+            updated = await service.set_username(user.id, body.username)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        audit(user.email, "user.username", detail=updated.username or "")
+        return {"status": "ok", "username": updated.username or ""}
 
     @router.post("/auth/totp/enroll")
     async def totp_enroll(user: User = Depends(current_user)) -> dict[str, str]:  # type: ignore[arg-type]
@@ -287,14 +306,35 @@ def build_auth_router(
             raise HTTPException(status_code=404, detail="setup not available") from None
         if not hmac.compare_digest(expected, body.token.strip()):
             raise HTTPException(status_code=400, detail="invalid setup token")
+        if (
+            body.password_confirm is not None
+            and body.password_confirm != body.password
+        ):
+            raise HTTPException(status_code=400, detail="passwords do not match")
+        username: str | None = None
+        if body.username is not None and body.username.strip():
+            try:
+                username = validate_username(body.username)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="invalid username"
+                ) from None
+            if await service.get_by_username(username) is not None:
+                raise HTTPException(
+                    status_code=400, detail="username already taken"
+                )
         try:
-            await service.create_first_admin(body.email, body.password)
+            await service.create_first_admin(
+                body.email, body.password, username
+            )
         except ValueError:
             raise HTTPException(
                 status_code=404, detail="setup already completed"
             ) from None
         except InvalidPasswordException as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+        if language_sink is not None and body.language in ("en", "ja"):
+            language_sink(body.language)
         token_file.unlink(missing_ok=True)
         return {"status": "ok"}
 

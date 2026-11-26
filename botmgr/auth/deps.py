@@ -134,3 +134,11 @@ async def init_auth_db(bundle: AuthBundle) -> None:
                 await conn.exec_driver_sql(
                     f"ALTER TABLE user ADD COLUMN {name} TEXT DEFAULT '[]'"
                 )
+        if "username" not in columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE user ADD COLUMN username VARCHAR(64)"
+            )
+        await conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_user_username"
+            " ON user (username)"
+        )

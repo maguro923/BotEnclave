@@ -1,33 +1,57 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card" style="max-width: 420px; margin: 3rem auto;">
-  <h1>First-run setup</h1>
-  <p>Create the first administrator account. The setup token was printed to
-  the server console and stored in the <code>setup-token</code> file next to
-  the databases.</p>
+  <h1>{{ t('setup.title') }}</h1>
+  <p>{{ t('setup.intro') }}</p>
   <form id="setup-form">
-    <p><input type="text" id="token" placeholder="Setup token" required style="width: 100%;"></p>
-    <p><input type="email" id="email" placeholder="Admin email" required style="width: 100%;"></p>
-    <p><input type="password" id="password" placeholder="Password (10+ characters)" required style="width: 100%;"></p>
-    <p id="error" style="color: #ff7b72;"></p>
-    <button type="submit" style="width: 100%;">Create administrator</button>
+    <p>
+      <label>{{ t('setup.language') }}
+        <select id="language" style="width: 100%;">
+          <option value="en" {% if lang == 'en' %}selected{% endif %}>English</option>
+          <option value="ja" {% if lang == 'ja' %}selected{% endif %}>日本語</option>
+        </select>
+      </label>
+    </p>
+    <p><input type="text" id="token" placeholder="{{ t('setup.token') }}" required style="width: 100%;"></p>
+    <p><input type="text" id="username" placeholder="{{ t('setup.username') }}" required style="width: 100%;">
+      <br><span class="muted">{{ t('setup.username_hint') }}</span></p>
+    <p><input type="email" id="email" placeholder="{{ t('setup.email') }}" required style="width: 100%;"></p>
+    <p class="pw-row"><input type="password" id="password" placeholder="{{ t('setup.password') }}" required>
+      <button type="button" class="secondary" data-pw-toggle="password" onclick="togglePw(this)">{{ t('common.show') }}</button></p>
+    <p class="pw-row"><input type="password" id="password-confirm" placeholder="{{ t('setup.password_confirm') }}" required>
+      <button type="button" class="secondary" data-pw-toggle="password-confirm" onclick="togglePw(this)">{{ t('common.show') }}</button></p>
+    <p id="error" class="error"></p>
+    <button type="submit" style="width: 100%;">{{ t('setup.submit') }}</button>
   </form>
 </div>
 <script>
+document.getElementById('language').addEventListener('change', (e) => {
+  location.href = '/setup?lang=' + e.target.value;
+});
 document.getElementById('setup-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  const err = document.getElementById('error');
+  const password = document.getElementById('password').value;
+  const confirm = document.getElementById('password-confirm').value;
+  if (password !== confirm) {
+    err.textContent = window.t('setup.mismatch');
+    return;
+  }
   const resp = await fetch('/setup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       token: document.getElementById('token').value,
+      username: document.getElementById('username').value,
       email: document.getElementById('email').value,
-      password: document.getElementById('password').value,
+      password: password,
+      password_confirm: confirm,
+      language: document.getElementById('language').value,
     }),
   });
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
-    document.getElementById('error').textContent = 'Setup failed: ' + (data.detail || resp.status);
+    err.textContent = window.t('setup.failed') + ': ' + (data.detail || resp.status);
     return;
   }
   location.href = '/login';

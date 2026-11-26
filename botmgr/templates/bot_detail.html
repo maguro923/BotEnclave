@@ -7,107 +7,99 @@
 {% block content %}
 <h1>{{ bot }} <span class="badge {{ state }}" id="state-badge">{{ state }}</span></h1>
 <p>
-  <button id="start-btn">Start</button>
-  <button class="secondary" id="stop-btn">Stop</button>
-  <button class="danger" id="delete-btn">Delete</button>
-  <span id="action-result" style="color: #d29922;"></span>
+  <button id="start-btn">{{ t('bot.start') }}</button>
+  <button class="secondary" id="stop-btn">{{ t('bot.stop') }}</button>
+  <button class="danger" id="delete-btn">{{ t('bot.delete') }}</button>
+  <span id="action-result" class="warn"></span>
 </p>
 
 <div class="card">
-  <h2>Deploy</h2>
+  <h2>{{ t('bot.deploy') }}</h2>
   <form id="git-form">
-    <input type="text" id="git-url" placeholder="Git URL (https:// or git@…)" style="width: 55%;">
-    <input type="text" id="git-branch" placeholder="Branch (optional)" style="width: 20%;">
-    <button type="submit">Deploy from Git</button>
+    <input type="text" id="git-url" placeholder="{{ t('bot.git_url') }}" style="width: 55%;">
+    <input type="text" id="git-branch" placeholder="{{ t('bot.branch') }}" style="width: 20%;">
+    <button type="submit">{{ t('bot.deploy_git') }}</button>
   </form>
   <form id="zip-form" style="margin-top: .5rem;">
     <input type="file" id="zip-file" accept=".zip">
-    <button type="submit">Deploy from zip</button>
+    <button type="submit">{{ t('bot.deploy_zip') }}</button>
   </form>
-  <p id="deploy-result" style="color: #d29922;"></p>
+  <p id="deploy-result" class="warn"></p>
   <table>
-    <thead><tr><th>Release</th><th>Source</th><th>Active</th><th></th></tr></thead>
+    <thead><tr><th>{{ t('bot.release') }}</th><th>{{ t('bot.source') }}</th><th>{{ t('bot.active_col') }}</th><th></th></tr></thead>
     <tbody id="release-rows"></tbody>
   </table>
-  <p><button class="secondary" id="rollback-btn">Roll back to previous release</button></p>
+  <p><button class="secondary" id="rollback-btn">{{ t('bot.rollback') }}</button></p>
   <pre class="log" id="deploy-log" style="height: 160px;" hidden></pre>
 </div>
 
 <div class="card">
-  <h2>Environment variables</h2>
-  <p style="color: #8b949e;">Saved values are never shown again. Saving replaces the whole
-  set. Backend: <strong id="env-backend-label"></strong></p>
-  <p>Current keys: <span id="env-keys"></span></p>
+  <h2>{{ t('bot.env') }}</h2>
+  <p class="muted">{{ t('bot.env_note') }} <strong id="env-backend-label"></strong></p>
+  <p>{{ t('bot.env_keys') }} <span id="env-keys"></span></p>
   <form id="env-form">
     <p><textarea id="env-text" rows="6" style="width: 100%;" placeholder="DISCORD_TOKEN=...&#10;OTHER_KEY=value"></textarea></p>
-    <label>Backend
+    <label>{{ t('bot.backend') }}
       <select id="env-backend">
-        <option value="systemd-creds">systemd-creds (standard)</option>
-        <option value="fernet">Fernet (non-systemd fallback)</option>
-        <option value="memory">Memory only (re-enter after manager restart)</option>
+        <option value="systemd-creds">{{ t('bot.backend_systemd') }}</option>
+        <option value="fernet">{{ t('bot.backend_fernet') }}</option>
+        <option value="memory">{{ t('bot.backend_memory') }}</option>
       </select>
     </label>
-    <button type="submit">Save environment</button>
-    <span id="env-result" style="color: #d29922;"></span>
+    <button type="submit">{{ t('bot.env_save') }}</button>
+    <span id="env-result" class="warn"></span>
   </form>
   <p>
-    <label><input type="checkbox" id="dotenv-mode"> dotenv compatibility mode: also write
-    the values as a plaintext <code>data/.env</code> at start</label>
+    <label><input type="checkbox" id="dotenv-mode"> {{ t('bot.dotenv_mode') }}</label>
   </p>
-  <p class="notice" id="dotenv-warning" hidden>dotenv mode keeps secrets as plaintext on
-  disk (and in backups). Use it only for bots that cannot read environment variables.</p>
+  <p class="notice" id="dotenv-warning" hidden>{{ t('bot.dotenv_warning') }}</p>
 </div>
 
 <div class="card">
-  <h2>Git webhook</h2>
-  <p>Status: <span id="webhook-status"></span></p>
-  <button class="secondary" id="webhook-rotate">Generate / rotate webhook secret</button>
+  <h2>{{ t('bot.webhook') }}</h2>
+  <p>{{ t('bot.webhook_status') }} <span id="webhook-status"></span></p>
+  <button class="secondary" id="webhook-rotate">{{ t('bot.webhook_rotate') }}</button>
   <p id="webhook-secret" style="word-break: break-all;"></p>
-  <p style="color: #8b949e;">POST to <code>/webhooks/git/{{ bot }}</code> with headers
-  <code>X-BotEnclave-Timestamp</code> and <code>X-BotEnclave-Signature</code>
-  (HMAC-SHA256 of <code>timestamp + "." + body</code>) and a JSON body
-  <code>{"repo": "&lt;registered git URL&gt;", "branch": "&lt;branch&gt;"}</code>.</p>
+  <p class="muted">{{ t('bot.webhook_note').replace('{bot}', bot)|safe }}</p>
 </div>
 
 <div class="card">
-  <h2>Files</h2>
+  <h2>{{ t('bot.files') }}</h2>
   <p>
-    Zone
+    {{ t('bot.zone') }}
     <select id="file-zone">
-      <option value="data">data (editable)</option>
-      <option value="logs">logs (read-only)</option>
-      <option value="releases">releases (read-only)</option>
+      <option value="data">{{ t('bot.zone_data') }}</option>
+      <option value="logs">{{ t('bot.zone_logs') }}</option>
+      <option value="releases">{{ t('bot.zone_releases') }}</option>
     </select>
-    Path: <span id="file-path"></span>
-    <button class="secondary" id="file-up">Up</button>
-    <button class="secondary" id="file-newdir">New folder</button>
-    <button class="secondary" id="file-newfile">New file</button>
+    {{ t('bot.path') }} <span id="file-path"></span>
+    <button class="secondary" id="file-up">{{ t('bot.up') }}</button>
+    <button class="secondary" id="file-newdir">{{ t('bot.new_folder') }}</button>
+    <button class="secondary" id="file-newfile">{{ t('bot.new_file') }}</button>
   </p>
   <table>
-    <thead><tr><th>Name</th><th>Kind</th><th>Size</th><th></th></tr></thead>
+    <thead><tr><th>{{ t('bot.name_col') }}</th><th>{{ t('bot.kind') }}</th><th>{{ t('bot.size') }}</th><th></th></tr></thead>
     <tbody id="file-rows"></tbody>
   </table>
   <div id="file-editor" hidden>
-    <p>Editing <code id="editor-path"></code></p>
+    <p>{{ t('bot.editing') }} <code id="editor-path"></code></p>
     <textarea id="editor-text" rows="14" style="width: 100%;"></textarea>
     <p>
-      <button id="editor-save">Save</button>
-      <button class="secondary" id="editor-close">Close</button>
-      <span id="editor-result" style="color: #d29922;"></span>
+      <button id="editor-save">{{ t('bot.save') }}</button>
+      <button class="secondary" id="editor-close">{{ t('bot.close') }}</button>
+      <span id="editor-result" class="warn"></span>
     </p>
   </div>
 </div>
 
 <div class="card">
-  <h2>Console</h2>
-  <p class="notice">Private mode is ON while you are connected: output is not
-  written to the log file, so passwords typed here do not end up in logs.
-  That also means output from this period is missing from the log below.</p>
+  <h2>{{ t('bot.console') }}</h2>
+  <p class="notice">{{ t('bot.console_notice') }}</p>
   <div id="terminal"></div>
 </div>
 
 <div class="card">
-  <h2>Log</h2>
+  <h2>{{ t('bot.log') }}</h2>
   <pre class="log" id="log"></pre>
 </div>
 
@@ -122,12 +114,12 @@ $('start-btn').onclick = async () => {
   $('state-badge').textContent = data.state || '?';
   $('state-badge').className = 'badge ' + (data.state || '');
   if (data.state === 'secret-pending') {
-    showResult($('action-result'), 'Secrets are not loaded (memory backend). Re-save the environment below, then start again.');
+    showResult($('action-result'), window.t('bot.secret_pending'));
   }
 };
 $('stop-btn').onclick = () => apiFetch('/api/bots/' + botId + '/stop', { method: 'POST' });
 $('delete-btn').onclick = async () => {
-  if (!confirm('Delete bot ' + botId + '?')) return;
+  if (!confirm(window.t('bot.delete_confirm').replace('{name}', botId))) return;
   await apiFetch('/api/bots/' + botId, { method: 'DELETE' });
   location.href = '/';
 };
@@ -143,16 +135,16 @@ async function loadReleases() {
     const td = (text) => { const c = document.createElement('td'); c.textContent = text; return c; };
     tr.appendChild(td(r.release_id));
     tr.appendChild(td(r.source_ref));
-    tr.appendChild(td(r.active ? 'yes' : ''));
+    tr.appendChild(td(r.active ? window.t('bot.yes') : ''));
     const cell = document.createElement('td');
     const btn = document.createElement('button');
     btn.className = 'secondary';
-    btn.textContent = 'Deploy log';
+    btn.textContent = window.t('bot.deploy_log');
     btn.onclick = async () => {
       const resp2 = await fetch('/api/bots/' + botId + '/releases/' + r.release_id + '/log');
       const data = await resp2.json();
       $('deploy-log').hidden = false;
-      $('deploy-log').textContent = data.log || '(empty)';
+      $('deploy-log').textContent = data.log || window.t('bot.empty');
     };
     cell.appendChild(btn);
     tr.appendChild(cell);
@@ -161,31 +153,31 @@ async function loadReleases() {
 }
 $('git-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  showResult($('deploy-result'), 'Deploying…');
+  showResult($('deploy-result'), window.t('bot.deploying'));
   const resp = await apiFetch('/api/bots/' + botId + '/deploy/git', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url: $('git-url').value.trim(), branch: $('git-branch').value.trim() || null }),
   });
   const data = await resp.json().catch(() => ({}));
-  showResult($('deploy-result'), resp.ok ? 'Deployed release ' + data.release_id : 'Failed: ' + (data.detail || resp.status));
+  showResult($('deploy-result'), resp.ok ? window.t('bot.deployed').replace('{id}', data.release_id) : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
   loadReleases();
 });
 $('zip-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const file = $('zip-file').files[0];
   if (!file) return;
-  showResult($('deploy-result'), 'Uploading…');
+  showResult($('deploy-result'), window.t('bot.uploading'));
   const form = new FormData();
   form.append('file', file);
   const resp = await apiFetch('/api/bots/' + botId + '/deploy/upload', { method: 'POST', body: form });
   const data = await resp.json().catch(() => ({}));
-  showResult($('deploy-result'), resp.ok ? 'Deployed release ' + data.release_id : 'Failed: ' + (data.detail || resp.status));
+  showResult($('deploy-result'), resp.ok ? window.t('bot.deployed').replace('{id}', data.release_id) : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
   loadReleases();
 });
 $('rollback-btn').onclick = async () => {
   const resp = await apiFetch('/api/bots/' + botId + '/rollback', { method: 'POST' });
   const data = await resp.json().catch(() => ({}));
-  showResult($('deploy-result'), resp.ok ? 'Rolled back to ' + data.release_id : 'Failed: ' + (data.detail || resp.status));
+  showResult($('deploy-result'), resp.ok ? window.t('bot.rolled_back').replace('{id}', data.release_id) : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
   loadReleases();
 };
 loadReleases();
@@ -196,7 +188,7 @@ async function loadEnv() {
   const data = await resp.json();
   $('env-backend-label').textContent = data.backend;
   $('env-backend').value = data.backend;
-  $('env-keys').textContent = data.keys.length ? data.keys.join(', ') : '(none)';
+  $('env-keys').textContent = data.keys.length ? data.keys.join(', ') : window.t('bot.env_none');
   $('dotenv-mode').checked = !!data.dotenv_mode;
   $('dotenv-warning').hidden = !data.dotenv_mode;
 }
@@ -207,7 +199,7 @@ $('env-form').addEventListener('submit', async (e) => {
     const t = line.trim();
     if (!t || t.startsWith('#')) continue;
     const i = t.indexOf('=');
-    if (i < 0) { showResult($('env-result'), 'Bad line: ' + t); return; }
+    if (i < 0) { showResult($('env-result'), window.t('bot.bad_line').replace('{line}', t)); return; }
     env[t.slice(0, i).trim()] = t.slice(i + 1).trim();
   }
   const resp = await apiFetch('/api/bots/' + botId + '/env', {
@@ -215,10 +207,10 @@ $('env-form').addEventListener('submit', async (e) => {
     body: JSON.stringify({ env, backend: $('env-backend').value }),
   });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) { showResult($('env-result'), 'Failed: ' + (data.detail || resp.status)); return; }
-  let msg = 'Saved.';
-  if (data.bot_identity) msg += ' Discord bot: ' + data.bot_identity.username + ' (' + data.bot_identity.id + ').';
-  if (data.warnings && data.warnings.length) msg += ' Warnings: ' + data.warnings.join(' / ');
+  if (!resp.ok) { showResult($('env-result'), window.t('bot.failed').replace('{detail}', data.detail || resp.status)); return; }
+  let msg = window.t('bot.env_saved');
+  if (data.bot_identity) msg += ' ' + window.t('bot.discord_bot').replace('{username}', data.bot_identity.username).replace('{id}', data.bot_identity.id);
+  if (data.warnings && data.warnings.length) msg += ' ' + window.t('bot.warnings').replace('{warnings}', data.warnings.join(' / '));
   showResult($('env-result'), msg);
   $('env-text').value = '';
   loadEnv();
@@ -236,12 +228,12 @@ loadEnv();
 async function loadWebhook() {
   const resp = await fetch('/api/bots/' + botId + '/webhook');
   const data = await resp.json();
-  $('webhook-status').textContent = data.configured ? 'secret configured' : 'no secret yet';
+  $('webhook-status').textContent = data.configured ? window.t('bot.configured') : window.t('bot.not_configured');
 }
 $('webhook-rotate').onclick = async () => {
   const resp = await apiFetch('/api/bots/' + botId + '/webhook-secret', { method: 'POST' });
   const data = await resp.json();
-  $('webhook-secret').textContent = 'New secret (shown once): ' + data.secret;
+  $('webhook-secret').textContent = window.t('bot.webhook_new_secret').replace('{secret}', data.secret);
   loadWebhook();
 };
 loadWebhook();
@@ -273,20 +265,20 @@ async function loadFiles() {
     const actCell = document.createElement('td');
     if (entry.kind === 'file') {
       const open = document.createElement('button');
-      open.className = 'secondary'; open.textContent = 'Open';
+      open.className = 'secondary'; open.textContent = window.t('bot.open');
       open.onclick = () => openFile(entry.name);
       actCell.appendChild(open);
       const dl = document.createElement('a');
       dl.href = '/api/bots/' + botId + '/files/download?zone=' + zone + '&path=' + encodeURIComponent((filePath ? filePath + '/' : '') + entry.name);
-      dl.textContent = 'Download';
+      dl.textContent = window.t('bot.download');
       actCell.appendChild(document.createTextNode(' '));
       actCell.appendChild(dl);
     }
     if (zone === 'data' && entry.kind !== 'symlink') {
       const del = document.createElement('button');
-      del.className = 'danger'; del.textContent = 'Delete';
+      del.className = 'danger'; del.textContent = window.t('bot.delete');
       del.onclick = async () => {
-        if (!confirm('Delete ' + entry.name + '?')) return;
+        if (!confirm(window.t('bot.file_delete_confirm').replace('{name}', entry.name))) return;
         await apiFetch('/api/bots/' + botId + '/files?zone=data&path=' + encodeURIComponent((filePath ? filePath + '/' : '') + entry.name), { method: 'DELETE' });
         loadFiles();
       };
@@ -302,7 +294,7 @@ async function openFile(name) {
   const rel = (filePath ? filePath + '/' : '') + name;
   const resp = await fetch('/api/bots/' + botId + '/files/content?zone=' + zone + '&path=' + encodeURIComponent(rel));
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok || data.kind !== 'text') { alert('Cannot edit this file (binary or error). Use Download.'); return; }
+  if (!resp.ok || data.kind !== 'text') { alert(window.t('bot.cannot_edit')); return; }
   $('editor-path').textContent = rel;
   $('editor-text').value = data.content;
   $('editor-save').disabled = zone !== 'data';
@@ -313,13 +305,13 @@ $('editor-save').onclick = async () => {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ zone: 'data', path: $('editor-path').textContent, content: $('editor-text').value }),
   });
-  showResult($('editor-result'), resp.ok ? 'Saved.' : 'Failed: ' + resp.status);
+  showResult($('editor-result'), resp.ok ? window.t('common.saved') : window.t('bot.failed').replace('{detail}', resp.status));
 };
 $('editor-close').onclick = () => { $('file-editor').hidden = true; };
 $('file-zone').onchange = () => { filePath = ''; $('file-editor').hidden = true; loadFiles(); };
 $('file-up').onclick = () => { filePath = filePath.split('/').slice(0, -1).join('/'); loadFiles(); };
 $('file-newdir').onclick = async () => {
-  const name = prompt('Folder name');
+  const name = prompt(window.t('bot.folder_name'));
   if (!name) return;
   await apiFetch('/api/bots/' + botId + '/files/mkdir', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -328,7 +320,7 @@ $('file-newdir').onclick = async () => {
   loadFiles();
 };
 $('file-newfile').onclick = async () => {
-  const name = prompt('File name');
+  const name = prompt(window.t('bot.file_name'));
   if (!name) return;
   await apiFetch('/api/bots/' + botId + '/files/content', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },

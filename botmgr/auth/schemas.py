@@ -14,6 +14,7 @@ from pydantic import BaseModel, EmailStr
 class UserRead(schemas.BaseUser[int]):
     must_change_password: bool = False
     totp_enabled: bool = False
+    username: str | None = None
 
 
 class UserCreate(schemas.BaseUserCreate):
@@ -48,3 +49,13 @@ class SetupRequest(BaseModel):
     token: str
     email: EmailStr
     password: str
+    # Sent by the setup form; optional for API compatibility. When
+    # present, password_confirm must match password, and username is
+    # validated and stored. language becomes the panel language.
+    password_confirm: str | None = None
+    username: str | None = None
+    language: str = "en"
+
+
+class UsernameRequest(BaseModel):
+    username: str

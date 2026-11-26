@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ t('settings.title') }}</h1>
+<div class="card">
+  <h2>{{ t('settings.language') }}</h2>
+  <p class="muted">{{ t('settings.language_note') }}</p>
+  <form id="settings-form">
+    <p>
+      <select id="language">
+        <option value="en" {% if lang == 'en' %}selected{% endif %}>English</option>
+        <option value="ja" {% if lang == 'ja' %}selected{% endif %}>日本語</option>
+      </select>
+    </p>
+    <button type="submit">{{ t('settings.save') }}</button>
+    <span id="settings-result"></span>
+  </form>
+</div>
+<script>
+document.getElementById('settings-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const resp = await apiFetch('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ language: document.getElementById('language').value }),
+  });
+  const result = document.getElementById('settings-result');
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    result.textContent = window.t('common.failed') + ': ' + (data.detail || resp.status);
+    return;
+  }
+  result.textContent = window.t('common.saved');
+  setTimeout(() => location.reload(), 400);
+});
+</script>
+{% endblock %}

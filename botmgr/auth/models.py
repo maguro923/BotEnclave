@@ -33,6 +33,9 @@ class User(SQLAlchemyBaseUserTable[int], Base):
     backup_codes: Mapped[str] = mapped_column(Text, default="[]")
     # JSON list of recent temporary-password issue timestamps (rate limit).
     temp_pw_issues: Mapped[str] = mapped_column(Text, default="[]")
+    # Optional display/login-adjacent name, unique when set. Email stays
+    # the login identifier; the username is what the UI shows.
+    username: Mapped[str | None] = mapped_column(String(64), default=None)
 
 
 class AccessToken(SQLAlchemyBaseAccessTokenTable[int], Base):

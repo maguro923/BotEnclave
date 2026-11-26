@@ -137,11 +137,16 @@ see section 6.
    sudo journalctl -u botenclave | grep setup
    ```
 
-   The token file is deleted once setup completes; if you lose it
-   before finishing, restart the manager to mint a new one, or run
-   `botmgr --root /srv/botenclave setup-token`.
-3. Create the administrator account (password: at least 10
-   characters). You are signed in immediately afterwards.
+   The token file is deleted once setup completes. If you lose it
+   before finishing, re-run the installer (it replaces the token and
+   prints the new one), delete the file and restart the manager, or
+   run `botmgr --root /srv/botenclave setup-token --regenerate`.
+3. Create the administrator account: a username, an email address
+   and a password (at least 10 characters, entered twice — a
+   mismatch is rejected). The form also picks the panel language
+   (English or Japanese); it applies to the whole panel and can be
+   changed at any time under **Settings**. You are signed in
+   immediately afterwards.
 
 Right after setup, open **Account** and enable **TOTP two-factor
 authentication** — the dashboard shows a warning banner until the
@@ -184,11 +189,24 @@ as that bot's OS user.
 
 The panel serves HTTPS only, with a self-signed certificate the
 manager generates into its data root at first start
-(`tls-cert.pem` / `tls-key.pem`, key mode 600, five-year validity,
-covering `localhost`, the hostname and the host's addresses as seen
-at generation time). Plain HTTP is not served at all: an `http://`
-request to the port is refused by the TLS handshake, not
-redirected.
+(`tls-cert.pem` / `tls-key.pem`, key mode 600, covering `localhost`,
+the hostname and the host's addresses as seen at generation time).
+Plain HTTP is not served at all: an `http://` request to the port
+is refused by the TLS handshake, not redirected.
+
+The certificate is short-lived, following the industry move away
+from multi-year certificates: it is valid for 31 days and renewed
+roughly monthly. When 7 days or less remain — checked at startup
+and once a day while running — a fresh key pair is generated and
+both files are replaced atomically (a new key every cycle, and the
+address list is recomputed, so address changes are picked up). A
+failed renewal never takes the panel down: the old pair keeps
+serving and renewal is retried at the next check. Under systemd
+the manager restarts itself to apply a renewed pair (the unit is
+`Restart=always`); under any other supervisor the pair takes
+effect at the next restart. Each renewal prints the new SHA-256
+fingerprint to the log. Deleting the two files and restarting
+regenerates them immediately.
 
 ### Who may reach the panel: access.toml
 
@@ -229,9 +247,10 @@ addresses.
 Two interactions to know: enforcement uses the client address as
 the manager sees it, so behind a reverse proxy every visitor
 appears as the proxy itself (`X-Forwarded-For` is not trusted);
-and if the host's address has changed since the certificate was
-generated, delete `tls-cert.pem` and `tls-key.pem` and restart to
-regenerate it with the current addresses. Session cookies are
+and the monthly renewal recomputes the certificate's address
+list, so a changed host address is picked up within a cycle (to
+apply it immediately, delete `tls-cert.pem` and `tls-key.pem` and
+restart). Session cookies are
 `Secure`, which HTTPS satisfies on any address, so logins hold on
 LAN addresses too.
 

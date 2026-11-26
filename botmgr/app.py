@@ -18,7 +18,9 @@ import fcntl
 import hashlib
 import hmac
 import json
+import os
 import secrets as stdlib_secrets
+import signal
 import threading
 import time
 from dataclasses import dataclass, field
@@ -60,6 +62,7 @@ from botmgr.helper import (
 )
 from botmgr.helper_backend import HelperBackend
 from botmgr.helperd import BOT_NAME_RE
+from botmgr.i18n import STRINGS, normalize_language, translator_for
 from botmgr.launcher import LaunchConfig
 from botmgr.logtail import LogFollower, read_tail
 from botmgr.masking import mask_lines
@@ -177,6 +180,22 @@ def create_app(config: AppConfig) -> FastAPI:
     deploy_service = DeployService(root, store, supervisor, client)
     webhook_secrets = WebhookSecrets(root)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+    def page_context(
+        extra: dict[str, Any] | None = None, *, lang: str | None = None
+    ) -> dict[str, Any]:
+        language = normalize_language(
+            lang if lang is not None else store.get_setting("language")
+        )
+        context: dict[str, Any] = {
+            "lang": language,
+            "t": translator_for(language),
+            "i18n": STRINGS[language],
+        }
+        if extra:
+            context.update(extra)
+        return context
+
     current_user = bundle.current_user
     current_user_optional = bundle.fastapi_users.current_user(
         optional=True, active=True
@@ -252,13 +271,17 @@ def create_app(config: AppConfig) -> FastAPI:
                 flush=True,
             )
         task = asyncio.create_task(_watchdog_loop(watchdog, audit))
+        tls_task = asyncio.create_task(_tls_rotation_loop(root, audit))
         app.state.lock_fd = lock_fd
         try:
             yield
         finally:
             task.cancel()
+            tls_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            with contextlib.suppress(asyncio.CancelledError):
+                await tls_task
             store.close()
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
@@ -308,7 +331,14 @@ def create_app(config: AppConfig) -> FastAPI:
         if origin and urlparse(origin).netloc != websocket.headers.get("host", ""):
             raise HTTPException(status_code=403, detail="origin mismatch")
 
-    app.include_router(build_auth_router(bundle, service, audit_sink=audit.record))
+    app.include_router(
+        build_auth_router(
+            bundle,
+            service,
+            audit_sink=audit.record,
+            language_sink=lambda lang: store.set_setting("language", lang),
+        )
+    )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -321,11 +351,16 @@ def create_app(config: AppConfig) -> FastAPI:
     # -- pages ---------------------------------------------------------------
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(request, "login.html", {})
+        return templates.TemplateResponse(request, "login.html", page_context())
 
     @app.get("/setup", response_class=HTMLResponse)
     async def setup_page(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(request, "setup.html", {})
+        requested = request.query_params.get("lang")
+        return templates.TemplateResponse(
+            request,
+            "setup.html",
+            page_context(lang=requested if requested in STRINGS else None),
+        )
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(
@@ -340,7 +375,7 @@ def create_app(config: AppConfig) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "dashboard.html",
-            {
+            page_context({
                 "user": user,
                 "bots": [
                     {
@@ -351,7 +386,7 @@ def create_app(config: AppConfig) -> FastAPI:
                     }
                     for b in bots
                 ],
-            },
+            }),
         )
 
     @app.get("/bots/{bot_id}", response_class=HTMLResponse)
@@ -363,11 +398,11 @@ def create_app(config: AppConfig) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "bot_detail.html",
-            {
+            page_context({
                 "user": user,
                 "bot": stored.bot_id,
                 "state": supervisor.state(stored.bot_id).value,
-            },
+            }),
         )
 
     @app.get("/users", response_class=HTMLResponse)
@@ -376,7 +411,7 @@ def create_app(config: AppConfig) -> FastAPI:
     ) -> HTMLResponse:
         users = await service.list_users()
         return templates.TemplateResponse(
-            request, "users.html", {"user": admin, "users": users}
+            request, "users.html", page_context({"user": admin, "users": users})
         )
 
     @app.get("/account", response_class=HTMLResponse)
@@ -384,8 +419,27 @@ def create_app(config: AppConfig) -> FastAPI:
         request: Request, user: User = Depends(current_user)  # type: ignore[arg-type]
     ) -> HTMLResponse:
         return templates.TemplateResponse(
-            request, "account.html", {"user": user}
+            request, "account.html", page_context({"user": user})
         )
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(
+        request: Request, admin: User = Depends(bundle.current_admin)  # type: ignore[arg-type]
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request, "settings.html", page_context({"user": admin})
+        )
+
+    @app.post("/api/settings")
+    async def update_settings(
+        body: dict[str, Any], admin: User = Depends(bundle.current_admin)  # type: ignore[arg-type]
+    ) -> dict[str, str]:
+        language = body.get("language")
+        if language not in STRINGS:
+            raise HTTPException(status_code=400, detail="unsupported language")
+        store.set_setting("language", str(language))
+        audit.record(admin.email, "settings.language", "", str(language))
+        return {"status": "ok", "language": str(language)}
 
     # -- bot API ---------------------------------------------------------------
     @app.get("/api/bots")
@@ -954,7 +1008,7 @@ def create_app(config: AppConfig) -> FastAPI:
     ) -> HTMLResponse:
         entries = visible_audit(user)[-200:][::-1]
         return templates.TemplateResponse(
-            request, "audit.html", {"user": user, "entries": entries}
+            request, "audit.html", page_context({"user": user, "entries": entries})
         )
 
     # -- admin: user deletion with bot transfer --------------------------------
@@ -1131,6 +1185,37 @@ async def _watchdog_loop(watchdog: Watchdog, audit: AuditLog) -> None:
         for event in events:
             audit.record("system", "watchdog", "", event)
         await asyncio.sleep(WATCHDOG_INTERVAL_SECONDS)
+
+
+_TLS_CHECK_INTERVAL_SECONDS = 86400.0
+
+
+async def _tls_rotation_loop(root: Path, audit: AuditLog) -> None:
+    """Daily TLS renewal check (the startup check lives in the CLI).
+
+    A renewal replaces the pair on disk; applying it needs a process
+    restart. Under systemd (Restart=always) the manager restarts
+    itself; elsewhere the new pair takes effect at the next restart
+    and the old certificate keeps serving in the meantime.
+    """
+    from botmgr.tls import rotate_tls_material
+
+    while True:
+        await asyncio.sleep(_TLS_CHECK_INTERVAL_SECONDS)
+        try:
+            rotated = await run_in_threadpool(rotate_tls_material, root)
+        except Exception:  # noqa: BLE001 - renewal must never kill the panel
+            rotated = False
+        if not rotated:
+            continue
+        audit.record("system", "tls.rotated", "", "certificate renewed")
+        if os.environ.get("INVOCATION_ID"):
+            print(
+                "[botenclave] tls: restarting to apply the renewed certificate",
+                flush=True,
+            )
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
 
 
 async def _console_sender(websocket: WebSocket, client: HelperClient, bot: str) -> None:

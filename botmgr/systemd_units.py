@@ -90,7 +90,7 @@ User={manager_user}
 WorkingDirectory={root}
 Environment=PYTHONPATH={package_dir.parent}
 ExecStart=/usr/bin/python3 -m botmgr.cli --root {root} serve --host {host} --port {port} --transport sudo
-Restart=on-failure
+Restart=always
 RestartSec=5
 MemoryMax=1G
 OOMScoreAdjust=-500

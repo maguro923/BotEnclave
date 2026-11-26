@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS token_registry (
     bot_id TEXT PRIMARY KEY REFERENCES bots(bot_id),
     token_hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 _BOT_COLUMN_MIGRATIONS = {
@@ -363,3 +367,21 @@ class StateStore:
                 (token_hash,),
             ).fetchone()
         return str(row[0]) if row else None
+
+    # -- panel-wide settings -------------------------------------------------
+
+    def get_setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value)"
+                " VALUES (?, ?)",
+                (key, value),
+            )
+            self._conn.commit()

@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card" style="max-width: 420px; margin: 3rem auto;">
-  <h1>Log in</h1>
+  <h1>{{ t('login.title') }}</h1>
   <form id="login-form">
-    <p><input type="email" id="email" placeholder="Email" required style="width: 100%;"></p>
-    <p><input type="password" id="password" placeholder="Password" required style="width: 100%;"></p>
-    <p id="totp-row" hidden><input type="text" id="totp" placeholder="One-time code (2FA)" autocomplete="one-time-code" style="width: 100%;"></p>
-    <p id="error" style="color: #ff7b72;"></p>
-    <button type="submit" style="width: 100%;">Log in</button>
+    <p><input type="email" id="email" placeholder="{{ t('login.email') }}" required style="width: 100%;"></p>
+    <p class="pw-row"><input type="password" id="password" placeholder="{{ t('login.password') }}" required>
+      <button type="button" class="secondary" data-pw-toggle="password" onclick="togglePw(this)">{{ t('common.show') }}</button></p>
+    <p id="totp-row" hidden><input type="text" id="totp" placeholder="{{ t('login.totp') }}" autocomplete="one-time-code" style="width: 100%;"></p>
+    <p id="error" class="error"></p>
+    <button type="submit" style="width: 100%;">{{ t('login.submit') }}</button>
   </form>
 </div>
 <script>
@@ -28,12 +29,12 @@ form.addEventListener('submit', async (e) => {
   const err = document.getElementById('error');
   if (resp.status === 401) {
     document.getElementById('totp-row').hidden = false;
-    err.textContent = 'Enter your one-time code.';
+    err.textContent = window.t('login.totp_prompt');
     return;
   }
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
-    err.textContent = 'Login failed: ' + (data.detail || resp.status);
+    err.textContent = window.t('login.failed') + ': ' + (data.detail || resp.status);
     return;
   }
   const data = await resp.json();

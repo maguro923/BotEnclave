@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import time
 from types import SimpleNamespace
@@ -35,6 +36,14 @@ LOCKOUT_THRESHOLD = 5
 LOCKOUT_SECONDS = 900
 TOTP_ISSUER = "BotEnclave"
 TEMP_PW_MAX_PER_HOUR = 5
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
+
+
+def validate_username(username: str) -> str:
+    name = username.strip()
+    if not USERNAME_PATTERN.match(name):
+        raise ValueError("invalid username")
+    return name
 BACKUP_CODE_COUNT = 8
 
 
@@ -82,7 +91,13 @@ class AuthService:
 
     # -- creation / first admin ------------------------------------------------
     async def _create(
-        self, email: str, password: str, *, is_admin: bool, must_change: bool
+        self,
+        email: str,
+        password: str,
+        *,
+        is_admin: bool,
+        must_change: bool,
+        username: str | None = None,
     ) -> User:
         async with self._bundle.session_factory() as session:
             manager = await self._manager(session)
@@ -90,6 +105,8 @@ class AuthService:
                 UserCreate(email=email, password=password),
                 safe=False,
             )
+            if username is not None:
+                user.username = validate_username(username)
             user.is_superuser = is_admin
             user.is_active = True
             user.is_verified = True
@@ -98,7 +115,30 @@ class AuthService:
             await session.refresh(user)
             return user
 
-    async def create_first_admin(self, email: str, password: str) -> User:
+    async def get_by_username(self, username: str) -> User | None:
+        async with self._bundle.session_factory() as session:
+            result = await session.execute(
+                select(User).where(User.username == username)
+            )
+            return result.scalars().first()
+
+    async def set_username(self, user_id: int, username: str) -> User:
+        name = validate_username(username)
+        existing = await self.get_by_username(name)
+        if existing is not None and existing.id != user_id:
+            raise ValueError("username already taken")
+        async with self._bundle.session_factory() as session:
+            user = await self._user_db(session).get(user_id)
+            if user is None:
+                raise ValueError("no such user")
+            user.username = name
+            await session.commit()
+            await session.refresh(user)
+            return user
+
+    async def create_first_admin(
+        self, email: str, password: str, username: str | None = None
+    ) -> User:
         # The count check and the create must be one atomic step: two
         # concurrent setup requests would otherwise both pass the check
         # (the Argon2 hashing in between makes the window wide) and each
@@ -107,7 +147,8 @@ class AuthService:
             if await self.count_users() > 0:
                 raise ValueError("setup already completed")
             return await self._create(
-                email, password, is_admin=True, must_change=False
+                email, password, is_admin=True, must_change=False,
+                username=username,
             )
 
     async def invite(self, email: str, is_admin: bool) -> tuple[User, str]:

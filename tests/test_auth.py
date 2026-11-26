@@ -373,3 +373,90 @@ def test_login_rate_limiter_evicts_stale_keys() -> None:
         limiter._hits[f"host|user{i}@example.com"] = [0.0]  # long aged out
     assert limiter.allow("host|fresh@example.com") is True
     assert len(limiter._hits) < 100
+
+
+def test_setup_password_confirm_mismatch(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    client = make_client(app)
+    resp = client.post(
+        "/setup",
+        json={
+            "token": "setup-token-123",
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD,
+            "password_confirm": ADMIN_PASSWORD + "x",
+            "username": "admin-one",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "passwords do not match"
+    assert client.get("/setup/status").json() == {"needed": True}
+
+
+def test_setup_with_username_and_language_sink(tmp_path: Path) -> None:
+    bundle = build_auth(tmp_path, secret="test-secret", cookie_secure=False)
+    asyncio.run(init_auth_db(bundle))
+    service = AuthService(bundle)
+    seen: list[str] = []
+    app = FastAPI()
+    app.include_router(
+        build_auth_router(bundle, service, language_sink=seen.append)
+    )
+    setup_token_path(tmp_path).write_text("setup-token-123", encoding="ascii")
+    client = make_client(app)
+    resp = client.post(
+        "/setup",
+        json={
+            "token": "setup-token-123",
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD,
+            "password_confirm": ADMIN_PASSWORD,
+            "username": "admin-one",
+            "language": "ja",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen == ["ja"]
+    user = asyncio.run(service.get_by_username("admin-one"))
+    assert user is not None and user.email == ADMIN_EMAIL
+
+
+def test_setup_rejects_invalid_username(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    client = make_client(app)
+    resp = client.post(
+        "/setup",
+        json={
+            "token": "setup-token-123",
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD,
+            "username": "a!",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid username"
+
+
+def test_set_username_endpoint(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, service = app_and_service
+    client = make_client(app)
+    do_setup(client)
+    login_resp = client.post(
+        "/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
+    )
+    assert login_resp.status_code == 200, login_resp.text
+    resp = client.post("/auth/username", json={"username": "the-admin"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["username"] == "the-admin"
+    me = client.get("/auth/me")
+    assert me.json()["username"] == "the-admin"
+    bad = client.post("/auth/username", json={"username": "x"})
+    assert bad.status_code == 400
+    user = asyncio.run(service.get_by_username("the-admin"))
+    assert user is not None

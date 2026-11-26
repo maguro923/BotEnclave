@@ -1,33 +1,30 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Your bots</h1>
+<h1>{{ t('dash.title') }}</h1>
 {% if user.is_superuser and not user.totp_enabled %}
-<p class="notice">You are an administrator without two-factor authentication.
-Set up TOTP under <a href="/account">Account</a> — an admin account is the
-keys to every bot on this host.</p>
+<p class="notice">{{ t('dash.totp_notice') }}</p>
 {% endif %}
 <div class="card">
-  <h2>Add a bot</h2>
+  <h2>{{ t('dash.add_bot') }}</h2>
   <form id="create-form">
-    <input type="text" id="bot-name" placeholder="Bot name (a-z, 0-9, -, _)" required>
-    <input type="text" id="bot-command" placeholder="Command, e.g. python3 bot.py" required style="width: 45%;">
-    <button type="submit">Create</button>
-    <span id="create-error" style="color: #ff7b72;"></span>
+    <input type="text" id="bot-name" placeholder="{{ t('dash.bot_name') }}" required>
+    <input type="text" id="bot-command" placeholder="{{ t('dash.bot_command') }}" required style="width: 45%;">
+    <button type="submit">{{ t('dash.create') }}</button>
+    <span id="create-error" class="error"></span>
   </form>
-  <p style="color: #8b949e;">The bot's OS user and folders are created now. Deploy code and
-  environment variables from the bot's page (deploy features) or into its data folder.</p>
+  <p class="muted">{{ t('dash.add_note') }}</p>
 </div>
 <table>
-  <thead><tr><th>Name</th><th>State</th><th></th></tr></thead>
+  <thead><tr><th>{{ t('dash.name') }}</th><th>{{ t('dash.state') }}</th><th></th></tr></thead>
   <tbody id="bot-rows">
   {% for bot in bots %}
     <tr>
       <td><a href="/bots/{{ bot.id }}">{{ bot.id }}</a></td>
       <td><span class="badge {{ bot.state }}" data-state-for="{{ bot.id }}">{{ bot.state }}</span>{% if bot.dotenv_mode %} <span class="badge backoff" title="dotenv compatibility mode: secrets are also written as plaintext data/.env">dotenv</span>{% endif %}</td>
       <td>
-        <button data-action="start" data-bot="{{ bot.id }}">Start</button>
-        <button class="secondary" data-action="stop" data-bot="{{ bot.id }}">Stop</button>
-        <button class="danger" data-action="delete" data-bot="{{ bot.id }}">Delete</button>
+        <button data-action="start" data-bot="{{ bot.id }}">{{ t('dash.start') }}</button>
+        <button class="secondary" data-action="stop" data-bot="{{ bot.id }}">{{ t('dash.stop') }}</button>
+        <button class="danger" data-action="delete" data-bot="{{ bot.id }}">{{ t('dash.delete') }}</button>
       </td>
     </tr>
   {% endfor %}
@@ -53,7 +50,7 @@ document.querySelectorAll('button[data-action]').forEach((btn) => {
   btn.addEventListener('click', async () => {
     const bot = btn.dataset.bot;
     if (btn.dataset.action === 'delete') {
-      if (!confirm('Delete bot ' + bot + '?')) return;
+      if (!confirm(window.t('dash.delete_confirm').replace('{name}', bot))) return;
       await apiFetch('/api/bots/' + bot, { method: 'DELETE' });
       location.reload();
       return;

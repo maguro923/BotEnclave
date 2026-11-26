@@ -699,3 +699,62 @@ def test_bot_delete_keeps_files_by_default_and_purges_on_request(
     assert resp.status_code == 200, resp.text
     assert fake.purged == ["alpha"]
     assert not bot_dir.exists()
+
+
+def test_settings_language_roundtrip(env: tuple[TestClient, FakeHelper, Path]) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    page = admin.get("/settings")
+    assert page.status_code == 200
+    assert "Panel language" in page.text
+    resp = admin.post("/api/settings", json={"language": "ja"})
+    assert resp.status_code == 200, resp.text
+    page = admin.get("/settings")
+    assert "全体設定" in page.text
+    dash = admin.get("/")
+    assert "あなたのBot" in dash.text
+    bad = admin.post("/api/settings", json={"language": "fr"})
+    assert bad.status_code == 400
+
+
+def test_settings_requires_admin(env: tuple[TestClient, FakeHelper, Path]) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    guest = invite_and_login(admin, client, GUEST_A)
+    assert guest.get("/settings").status_code in (400, 401, 403)
+    assert guest.post("/api/settings", json={"language": "ja"}).status_code in (
+        400,
+        401,
+        403,
+    )
+
+
+def test_setup_language_choice_applies(env: tuple[TestClient, FakeHelper, Path]) -> None:
+    client, _fake, root = env
+    token = (root / "setup-token").read_text(encoding="ascii").strip()
+    resp = client.post(
+        "/setup",
+        json={
+            "token": token,
+            "email": ADMIN[0],
+            "password": ADMIN[1],
+            "username": "admin-one",
+            "language": "ja",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    admin = login(client, *ADMIN)
+    dash = admin.get("/")
+    assert "あなたのBot" in dash.text
+    assert "admin-one" in dash.text  # username shown in the header
+
+
+def test_login_and_setup_pages_show_brand_and_light_default(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, _root = env
+    for path in ("/login", "/setup"):
+        page = client.get(path)
+        assert page.status_code == 200
+        assert "BotEnclave" in page.text
+        assert 'data-theme="light"' in page.text

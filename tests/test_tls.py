@@ -108,3 +108,77 @@ def test_https_served_and_plain_http_refused(tmp_path: Path) -> None:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+def test_validity_is_about_a_month(tmp_path: Path) -> None:
+    import datetime
+
+    cert_path, _ = ensure_tls_material(tmp_path)
+    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    span = cert.not_valid_after_utc - cert.not_valid_before_utc
+    assert datetime.timedelta(days=30) <= span <= datetime.timedelta(days=32)
+
+
+def test_near_expiry_pair_rotates_with_a_new_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr import tls
+
+    monkeypatch.setattr(tls, "_VALIDITY_DAYS", 3)
+    cert_path, key_path = ensure_tls_material(tmp_path)
+    old_key = key_path.read_bytes()
+    old_cert = cert_path.read_bytes()
+    monkeypatch.setattr(tls, "_VALIDITY_DAYS", 31)
+    ensure_tls_material(tmp_path)
+    assert key_path.read_bytes() != old_key
+    assert cert_path.read_bytes() != old_cert
+    assert not tls.tls_needs_rotation(cert_path)
+
+
+def test_rotate_tls_material_only_when_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr import tls
+
+    _cert_path, key_path = ensure_tls_material(tmp_path)
+    assert tls.rotate_tls_material(tmp_path) is False
+    monkeypatch.setattr(tls, "_RENEW_WITHIN_DAYS", 40)
+    old_key = key_path.read_bytes()
+    assert tls.rotate_tls_material(tmp_path) is True
+    assert key_path.read_bytes() != old_key
+
+
+def test_mismatched_pair_is_repaired(tmp_path: Path) -> None:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    cert_path, key_path = ensure_tls_material(tmp_path)
+    other = ec.generate_private_key(ec.SECP256R1())
+    key_path.write_bytes(
+        other.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    ensure_tls_material(tmp_path)
+    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    assert (
+        cert.public_key().public_numbers() == other.public_key().public_numbers()
+    )
+
+
+def test_legacy_long_lived_pair_converges_to_monthly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr import tls
+
+    monkeypatch.setattr(tls, "_VALIDITY_DAYS", 1825)
+    cert_path, key_path = ensure_tls_material(tmp_path)
+    old_key = key_path.read_bytes()
+    monkeypatch.setattr(tls, "_VALIDITY_DAYS", 31)
+    ensure_tls_material(tmp_path)
+    assert key_path.read_bytes() != old_key
+    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    span = cert.not_valid_after_utc - cert.not_valid_before_utc
+    assert span.days <= 32
