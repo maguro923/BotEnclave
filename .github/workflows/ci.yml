@@ -1,3 +1,17 @@
+# Proposed replacement for .github/workflows/ci.yml
+# (Rion applies this via the GitHub Web UI; the snapshot push cannot
+# update workflow files.)
+#
+# Changes from the current file:
+# 1. Python matrix gains 3.13 and 3.14 (production already runs 3.14).
+# 2. The test step measures coverage and enforces a floor, so thin
+#    spots cannot silently grow. Floor: 74% (measured on the
+#    non-root profile, rounded down).
+# 3. New `integration` job: the root-gated tests (real OS users, tmux,
+#    systemd-creds) run under sudo, so the privileged paths are
+#    exercised in CI instead of only on the dev VM. If the hosted
+#    runner's environment trips a platform-specific failure, make
+#    this job non-required first and fix forward.
 name: CI
 
 on:
@@ -16,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,11 +46,31 @@ jobs:
       - name: Type check
         run: mypy botmgr
       - name: Test
-        run: pytest -q
+        run: pytest -q --cov=botmgr --cov-report=term --cov-fail-under=74
       - name: Dependency audit
         run: |
           pip install pip-audit
           pip-audit
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          sudo apt-get update -qq && sudo apt-get install -y -qq tmux git
+      - name: Root-gated integration tests
+        run: |
+          sudo env "PATH=$PATH" python -m pytest -q \
+            tests/test_console_integration.py \
+            tests/test_helper_integration.py \
+            tests/test_reconcile_integration.py
 
   secrets-scan:
     runs-on: ubuntu-latest
