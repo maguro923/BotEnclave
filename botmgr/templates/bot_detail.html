@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/addon-fit.js"></script>
+{% endblock %}
+{% block content %}
+<h1>{{ bot }} <span class="badge {{ state }}" id="state-badge">{{ state }}</span></h1>
+<p>
+  <button id="start-btn">Start</button>
+  <button class="secondary" id="stop-btn">Stop</button>
+  <button class="danger" id="delete-btn">Delete</button>
+</p>
+
+<div class="card">
+  <h2>Console</h2>
+  <p class="notice">Private mode is ON while you are connected: output is not
+  written to the log file, so passwords typed here do not end up in logs.
+  That also means output from this period is missing from the log below.</p>
+  <div id="terminal"></div>
+</div>
+
+<div class="card">
+  <h2>Log</h2>
+  <pre class="log" id="log"></pre>
+</div>
+
+<script>
+const botId = {{ bot|tojson }};
+const api = (path, method) => fetch(path, { method });
+document.getElementById('start-btn').onclick = () => api('/api/bots/' + botId + '/start', 'POST');
+document.getElementById('stop-btn').onclick = () => api('/api/bots/' + botId + '/stop', 'POST');
+document.getElementById('delete-btn').onclick = async () => {
+  if (!confirm('Delete bot ' + botId + '?')) return;
+  await api('/api/bots/' + botId, 'DELETE');
+  location.href = '/';
+};
+
+const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+// Live log
+const logEl = document.getElementById('log');
+const logWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/log');
+logWs.onmessage = (event) => {
+  const { lines } = JSON.parse(event.data);
+  for (const line of lines) {
+    logEl.appendChild(document.createTextNode(line + '\n'));
+  }
+  while (logEl.childNodes.length > 2000) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+};
+// Interactive console (xterm.js, vendored)
+const term = new Terminal({ convertEol: false, fontSize: 13 });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('terminal'));
+fit.fit();
+const consoleWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/console');
+consoleWs.onopen = () => {
+  consoleWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+};
+consoleWs.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === 'screen') {
+    term.reset();
+    term.write(msg.data.replace(/\n/g, '\r\n'));
+  }
+};
+term.onData((data) => {
+  consoleWs.send(JSON.stringify({ type: 'input', data }));
+});
+term.onResize(({ cols, rows }) => {
+  consoleWs.send(JSON.stringify({ type: 'resize', cols, rows }));
+});
+window.addEventListener('resize', () => fit.fit());
+</script>
+{% endblock %}

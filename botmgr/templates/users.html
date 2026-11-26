@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Users</h1>
+<div class="card">
+  <h2>Invite a user</h2>
+  <form id="invite-form">
+    <input type="email" id="invite-email" placeholder="Email" required>
+    <button type="submit">Invite</button>
+    <span id="invite-result"></span>
+  </form>
+  <p style="color: #8b949e;">The invited user gets a one-time temporary password, shown once
+  here. Share it with them out of band; they must change it at first login.</p>
+</div>
+<table>
+  <thead><tr><th>Email</th><th>Role</th><th>Active</th><th>2FA</th><th></th></tr></thead>
+  <tbody>
+  {% for u in users %}
+    <tr>
+      <td>{{ u.email }}</td>
+      <td>{{ 'admin' if u.is_superuser else 'guest' }}</td>
+      <td>{{ 'yes' if u.is_active else 'no' }}</td>
+      <td>{{ 'on' if u.totp_enabled else 'off' }}</td>
+      <td>
+        <button class="secondary" data-temp="{{ u.id }}">Temp password</button>
+        {% if u.is_active %}
+        <button class="secondary" data-disable="{{ u.id }}">Disable</button>
+        {% else %}
+        <button class="secondary" data-enable="{{ u.id }}">Enable</button>
+        {% endif %}
+        <button class="danger" data-delete="{{ u.id }}">Delete…</button>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p id="action-result" style="color: #d29922;"></p>
+<script>
+const result = document.getElementById('action-result');
+document.getElementById('invite-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const resp = await fetch('/admin/users/invite', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: document.getElementById('invite-email').value }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { result.textContent = data.detail || resp.status; return; }
+  document.getElementById('invite-result').textContent =
+    'Temporary password for ' + data.email + ': ' + data.temp_password + ' (shown once)';
+  setTimeout(() => location.reload(), 4000);
+});
+document.querySelectorAll('button[data-temp]').forEach((btn) => {
+  btn.onclick = async () => {
+    const resp = await fetch('/admin/users/' + btn.dataset.temp + '/temp-password', { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    result.textContent = resp.ok
+      ? 'New temporary password for ' + data.email + ': ' + data.temp_password + ' (shown once)'
+      : (data.detail || resp.status);
+  };
+});
+document.querySelectorAll('button[data-disable]').forEach((btn) => {
+  btn.onclick = async () => {
+    await fetch('/admin/users/' + btn.dataset.disable + '/disable', { method: 'POST' });
+    location.reload();
+  };
+});
+document.querySelectorAll('button[data-enable]').forEach((btn) => {
+  btn.onclick = async () => {
+    await fetch('/admin/users/' + btn.dataset.enable + '/enable', { method: 'POST' });
+    location.reload();
+  };
+});
+document.querySelectorAll('button[data-delete]').forEach((btn) => {
+  btn.onclick = async () => {
+    const mode = confirm('Transfer this user\'s bots to you? OK = transfer, Cancel = delete bots too')
+      ? 'transfer' : 'delete';
+    const resp = await fetch('/admin/users/' + btn.dataset.delete + '?mode=' + mode, { method: 'DELETE' });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      result.textContent = data.detail || resp.status;
+      return;
+    }
+    location.reload();
+  };
+});
+</script>
+{% endblock %}

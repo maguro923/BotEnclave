@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Your bots</h1>
+<div class="card">
+  <h2>Add a bot</h2>
+  <form id="create-form">
+    <input type="text" id="bot-name" placeholder="Bot name (a-z, 0-9, -, _)" required>
+    <input type="text" id="bot-command" placeholder="Command, e.g. python3 bot.py" required style="width: 45%;">
+    <button type="submit">Create</button>
+    <span id="create-error" style="color: #ff7b72;"></span>
+  </form>
+  <p style="color: #8b949e;">The bot's OS user and folders are created now. Deploy code and
+  environment variables from the bot's page (deploy features) or into its data folder.</p>
+</div>
+<table>
+  <thead><tr><th>Name</th><th>State</th><th></th></tr></thead>
+  <tbody id="bot-rows">
+  {% for bot in bots %}
+    <tr>
+      <td><a href="/bots/{{ bot.id }}">{{ bot.id }}</a></td>
+      <td><span class="badge {{ bot.state }}" data-state-for="{{ bot.id }}">{{ bot.state }}</span></td>
+      <td>
+        <button data-action="start" data-bot="{{ bot.id }}">Start</button>
+        <button class="secondary" data-action="stop" data-bot="{{ bot.id }}">Stop</button>
+        <button class="danger" data-action="delete" data-bot="{{ bot.id }}">Delete</button>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<script>
+document.getElementById('create-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('bot-name').value.trim();
+  const command = document.getElementById('bot-command').value.trim().split(/\s+/);
+  const resp = await fetch('/api/bots', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, command }),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    document.getElementById('create-error').textContent = data.detail || resp.status;
+    return;
+  }
+  location.reload();
+});
+document.querySelectorAll('button[data-action]').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const bot = btn.dataset.bot;
+    if (btn.dataset.action === 'delete') {
+      if (!confirm('Delete bot ' + bot + '?')) return;
+      await fetch('/api/bots/' + bot, { method: 'DELETE' });
+      location.reload();
+      return;
+    }
+    await fetch('/api/bots/' + bot + '/' + btn.dataset.action, { method: 'POST' });
+  });
+});
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/overview');
+ws.onmessage = (event) => {
+  for (const bot of JSON.parse(event.data)) {
+    const badge = document.querySelector('[data-state-for="' + bot.id + '"]');
+    if (badge) { badge.textContent = bot.state; badge.className = 'badge ' + bot.state; }
+  }
+};
+</script>
+{% endblock %}

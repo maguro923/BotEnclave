@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Account</h1>
+{% if request.query_params.get('must_change') %}
+<p class="notice">You signed in with a temporary password. Change it now.</p>
+{% endif %}
+<div class="card">
+  <h2>Change password</h2>
+  <form id="pw-form">
+    <p><input type="password" id="current" placeholder="Current password" required></p>
+    <p><input type="password" id="new" placeholder="New password (10+ characters)" required></p>
+    <button type="submit">Change password</button>
+    <span id="pw-result"></span>
+  </form>
+</div>
+<div class="card">
+  <h2>Two-factor authentication (TOTP)</h2>
+  {% if user.totp_enabled %}
+  <p>2FA is <strong>on</strong>.</p>
+  <form id="totp-disable-form">
+    <input type="text" id="totp-disable-code" placeholder="Current one-time code" required>
+    <button class="danger" type="submit">Disable 2FA</button>
+    <span id="totp-result"></span>
+  </form>
+  {% else %}
+  <p>2FA is <strong>off</strong>.</p>
+  <button id="totp-start">Set up 2FA</button>
+  <div id="totp-enroll" hidden>
+    <p>Add this secret to your authenticator app, then enter a code to confirm:</p>
+    <p><code id="totp-secret"></code></p>
+    <p id="totp-uri" style="word-break: break-all; color: #8b949e;"></p>
+    <form id="totp-confirm-form">
+      <input type="text" id="totp-confirm-code" placeholder="One-time code" required>
+      <button type="submit">Confirm</button>
+    </form>
+  </div>
+  <span id="totp-result"></span>
+  {% endif %}
+</div>
+<script>
+document.getElementById('pw-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const resp = await fetch('/auth/change-password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password: document.getElementById('current').value,
+      new_password: document.getElementById('new').value,
+    }),
+  });
+  document.getElementById('pw-result').textContent = resp.ok
+    ? 'Changed. Please log in again.'
+    : 'Failed: ' + resp.status;
+  if (resp.ok) setTimeout(() => location.href = '/login', 1000);
+});
+const startBtn = document.getElementById('totp-start');
+if (startBtn) startBtn.onclick = async () => {
+  const resp = await fetch('/auth/totp/enroll', { method: 'POST' });
+  const data = await resp.json();
+  document.getElementById('totp-secret').textContent = data.secret;
+  document.getElementById('totp-uri').textContent = data.otpauth_url;
+  document.getElementById('totp-enroll').hidden = false;
+};
+const confirmForm = document.getElementById('totp-confirm-form');
+if (confirmForm) confirmForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const resp = await fetch('/auth/totp/confirm', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: document.getElementById('totp-confirm-code').value }),
+  });
+  document.getElementById('totp-result').textContent = resp.ok ? '2FA enabled.' : 'Invalid code.';
+  if (resp.ok) setTimeout(() => location.reload(), 800);
+});
+const disableForm = document.getElementById('totp-disable-form');
+if (disableForm) disableForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const resp = await fetch('/auth/totp/disable', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: document.getElementById('totp-disable-code').value }),
+  });
+  document.getElementById('totp-result').textContent = resp.ok ? '2FA disabled.' : 'Invalid code.';
+  if (resp.ok) setTimeout(() => location.reload(), 800);
+});
+</script>
+{% endblock %}

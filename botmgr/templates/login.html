@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width: 420px; margin: 3rem auto;">
+  <h1>Log in</h1>
+  <form id="login-form">
+    <p><input type="email" id="email" placeholder="Email" required style="width: 100%;"></p>
+    <p><input type="password" id="password" placeholder="Password" required style="width: 100%;"></p>
+    <p id="totp-row" hidden><input type="text" id="totp" placeholder="One-time code (2FA)" autocomplete="one-time-code" style="width: 100%;"></p>
+    <p id="error" style="color: #ff7b72;"></p>
+    <button type="submit" style="width: 100%;">Log in</button>
+  </form>
+</div>
+<script>
+const form = document.getElementById('login-form');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = {
+    email: document.getElementById('email').value,
+    password: document.getElementById('password').value,
+  };
+  const totp = document.getElementById('totp').value;
+  if (totp) body.totp_code = totp;
+  const resp = await fetch('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const err = document.getElementById('error');
+  if (resp.status === 401) {
+    document.getElementById('totp-row').hidden = false;
+    err.textContent = 'Enter your one-time code.';
+    return;
+  }
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    err.textContent = 'Login failed: ' + (data.detail || resp.status);
+    return;
+  }
+  const data = await resp.json();
+  location.href = data.must_change_password ? '/account?must_change=1' : '/';
+});
+</script>
+{% endblock %}

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width: 420px; margin: 3rem auto;">
+  <h1>First-run setup</h1>
+  <p>Create the first administrator account. The setup token was printed to
+  the server console and stored in the <code>setup-token</code> file next to
+  the databases.</p>
+  <form id="setup-form">
+    <p><input type="text" id="token" placeholder="Setup token" required style="width: 100%;"></p>
+    <p><input type="email" id="email" placeholder="Admin email" required style="width: 100%;"></p>
+    <p><input type="password" id="password" placeholder="Password (10+ characters)" required style="width: 100%;"></p>
+    <p id="error" style="color: #ff7b72;"></p>
+    <button type="submit" style="width: 100%;">Create administrator</button>
+  </form>
+</div>
+<script>
+document.getElementById('setup-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const resp = await fetch('/setup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token: document.getElementById('token').value,
+      email: document.getElementById('email').value,
+      password: document.getElementById('password').value,
+    }),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    document.getElementById('error').textContent = 'Setup failed: ' + (data.detail || resp.status);
+    return;
+  }
+  location.href = '/login';
+});
+</script>
+{% endblock %}

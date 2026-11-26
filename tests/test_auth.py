@@ -1,0 +1,227 @@
+import asyncio
+from pathlib import Path
+
+import pyotp
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from botmgr.auth.deps import build_auth, init_auth_db
+from botmgr.auth.routes import build_auth_router, setup_token_path
+from botmgr.auth.service import AuthService
+
+ADMIN_EMAIL = "admin@example.com"
+ADMIN_PASSWORD = "admin-password-1"
+GUEST_EMAIL = "guest@example.com"
+
+
+@pytest.fixture()
+def app_and_service(tmp_path: Path) -> tuple[FastAPI, AuthService]:
+    bundle = build_auth(tmp_path, secret="test-secret", cookie_secure=False)
+    asyncio.run(init_auth_db(bundle))
+    service = AuthService(bundle)
+    app = FastAPI()
+    app.include_router(build_auth_router(bundle, service))
+    setup_token_path(tmp_path).write_text("setup-token-123", encoding="ascii")
+    return app, service
+
+
+def make_client(app: FastAPI) -> TestClient:
+    return TestClient(app)
+
+
+def do_setup(client: TestClient) -> None:
+    resp = client.post(
+        "/setup",
+        json={
+            "token": "setup-token-123",
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def login(client: TestClient, email: str, password: str, **kw: object) -> object:
+    return client.post(
+        "/auth/login", json={"email": email, "password": password, **kw}
+    )
+
+
+def admin_client(app: FastAPI) -> TestClient:
+    client = make_client(app)
+    do_setup(client)
+    resp = login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+    assert resp.status_code == 200, resp.text  # type: ignore[attr-defined]
+    return client
+
+
+def test_setup_flow(app_and_service: tuple[FastAPI, AuthService]) -> None:
+    app, _service = app_and_service
+    client = make_client(app)
+    assert client.get("/setup/status").json() == {"needed": True}
+    bad = client.post(
+        "/setup",
+        json={"token": "wrong", "email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
+    )
+    assert bad.status_code == 400
+    do_setup(client)
+    assert client.get("/setup/status").json() == {"needed": False}
+    again = client.post(
+        "/setup",
+        json={
+            "token": "setup-token-123",
+            "email": "second@example.com",
+            "password": ADMIN_PASSWORD,
+        },
+    )
+    assert again.status_code == 404
+
+
+def test_login_and_me(app_and_service: tuple[FastAPI, AuthService]) -> None:
+    app, _service = app_and_service
+    client = admin_client(app)
+    me = client.get("/auth/me")
+    assert me.status_code == 200
+    assert me.json()["email"] == ADMIN_EMAIL
+    assert me.json()["is_superuser"] is True
+    anon = make_client(app)
+    assert anon.get("/auth/me").status_code == 401
+    bad = login(anon, ADMIN_EMAIL, "wrong-password")
+    assert bad.status_code == 400  # type: ignore[attr-defined]
+
+
+def test_lockout_and_unlock(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, service = app_and_service
+    client = make_client(app)
+    do_setup(client)
+    for _ in range(5):
+        login(client, ADMIN_EMAIL, "wrong-password")
+    locked = login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+    assert locked.status_code == 423  # type: ignore[attr-defined]
+    assert asyncio.run(service.unlock(ADMIN_EMAIL)) is True
+    ok = login(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+    assert ok.status_code == 200  # type: ignore[attr-defined]
+
+
+def test_invite_temp_password_and_forced_change(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    admin = admin_client(app)
+    invited = admin.post(
+        "/admin/users/invite", json={"email": GUEST_EMAIL, "is_admin": False}
+    )
+    assert invited.status_code == 200, invited.text
+    temp_password = invited.json()["temp_password"]
+
+    guest = make_client(app)
+    resp = login(guest, GUEST_EMAIL, temp_password)
+    assert resp.status_code == 200  # type: ignore[attr-defined]
+    assert resp.json()["must_change_password"] is True  # type: ignore[attr-defined]
+    changed = guest.post(
+        "/auth/change-password",
+        json={"current_password": temp_password, "new_password": "guest-new-pass-1"},
+    )
+    assert changed.status_code == 200
+    # Changing the password revokes existing sessions.
+    assert guest.get("/auth/me").status_code == 401
+    resp = login(guest, GUEST_EMAIL, "guest-new-pass-1")
+    assert resp.status_code == 200  # type: ignore[attr-defined]
+    assert resp.json()["must_change_password"] is False  # type: ignore[attr-defined]
+
+
+def test_guest_cannot_use_admin_routes(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    admin = admin_client(app)
+    invited = admin.post(
+        "/admin/users/invite", json={"email": GUEST_EMAIL, "is_admin": False}
+    )
+    temp_password = invited.json()["temp_password"]
+    guest = make_client(app)
+    login(guest, GUEST_EMAIL, temp_password)
+    assert guest.get("/admin/users").status_code == 403
+    assert (
+        guest.post(
+            "/admin/users/invite",
+            json={"email": "x@example.com", "is_admin": True},
+        ).status_code
+        == 403
+    )
+
+
+def test_totp_flow_and_replay_rejection(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    admin = admin_client(app)
+    enrolled = admin.post("/auth/totp/enroll")
+    assert enrolled.status_code == 200
+    secret = enrolled.json()["secret"]
+    code = pyotp.TOTP(secret).now()
+    assert admin.post("/auth/totp/confirm", json={"code": code}).status_code == 200
+    admin.post("/auth/logout")
+
+    fresh = make_client(app)
+    resp = login(fresh, ADMIN_EMAIL, ADMIN_PASSWORD)
+    assert resp.status_code == 401  # type: ignore[attr-defined]
+    assert resp.json()["detail"] == "totp_required"  # type: ignore[attr-defined]
+    # The enrolment code was already consumed by /auth/totp/confirm, so the
+    # successful login uses the next window's code.
+    import time as _time
+
+    code = pyotp.TOTP(secret).at(_time.time() + 30)
+    resp = login(fresh, ADMIN_EMAIL, ADMIN_PASSWORD, totp_code=code)
+    assert resp.status_code == 200  # type: ignore[attr-defined]
+    fresh.post("/auth/logout")
+    # The same code must not verify a second time (replay protection).
+    again = make_client(app)
+    resp = login(again, ADMIN_EMAIL, ADMIN_PASSWORD, totp_code=code)
+    assert resp.status_code == 400  # type: ignore[attr-defined]
+
+
+def test_disable_revokes_sessions_and_blocks_login(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    admin = admin_client(app)
+    invited = admin.post(
+        "/admin/users/invite", json={"email": GUEST_EMAIL, "is_admin": False}
+    )
+    guest_id = invited.json()["id"]
+    temp_password = invited.json()["temp_password"]
+    guest = make_client(app)
+    login(guest, GUEST_EMAIL, temp_password)
+    assert guest.get("/auth/me").status_code == 200
+    assert admin.post(f"/admin/users/{guest_id}/disable").status_code == 200
+    assert guest.get("/auth/me").status_code == 401
+    blocked = login(make_client(app), GUEST_EMAIL, temp_password)
+    assert blocked.status_code == 400  # type: ignore[attr-defined]
+
+
+def test_last_admin_cannot_be_disabled(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    admin = admin_client(app)
+    me = admin.get("/auth/me").json()
+    resp = admin.post(f"/admin/users/{me['id']}/disable")
+    assert resp.status_code == 400
+
+
+def test_users_router_is_read_only(
+    app_and_service: tuple[FastAPI, AuthService],
+) -> None:
+    app, _service = app_and_service
+    admin = admin_client(app)
+    me = admin.get("/users/me")
+    assert me.status_code == 200
+    assert admin.patch("/users/me", json={"email": "new@example.com"}).status_code in (
+        404,
+        405,
+    )
+    assert admin.delete(f"/users/{me.json()['id']}").status_code in (404, 405)

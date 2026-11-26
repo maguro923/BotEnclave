@@ -53,12 +53,14 @@ class Supervisor:
         self._bots: dict[str, _BotEntry] = {}
         self.last_errors: dict[str, Exception] = {}
 
-    def register(self, bot_id: str, config: LaunchConfig) -> None:
+    def register(
+        self, bot_id: str, config: LaunchConfig, owner_id: int | None = None
+    ) -> None:
         if bot_id in self._bots:
             raise ValueError(f"bot already registered: {bot_id}")
         self._bots[bot_id] = _BotEntry(config)
         if self._store is not None:
-            self._store.register_bot(bot_id, config)
+            self._store.register_bot(bot_id, config, owner_id)
 
     def bot_ids(self) -> list[str]:
         return sorted(self._bots)

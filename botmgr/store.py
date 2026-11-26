@@ -44,6 +44,7 @@ class StoredBot:
     config: LaunchConfig
     state: BotState
     identity: ProcessIdentity | None
+    owner_id: int | None = None
 
 
 def config_to_json(config: LaunchConfig) -> str:
@@ -74,6 +75,11 @@ class StateStore:
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(bots)")
+        }
+        if "owner_id" not in columns:
+            self._conn.execute("ALTER TABLE bots ADD COLUMN owner_id INTEGER")
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -81,12 +87,21 @@ class StateStore:
         with self._lock:
             self._conn.close()
 
-    def register_bot(self, bot_id: str, config: LaunchConfig) -> None:
+    def register_bot(
+        self, bot_id: str, config: LaunchConfig, owner_id: int | None = None
+    ) -> None:
         with self._lock:
+            if owner_id is None:
+                # Preserve an existing owner: reconcile re-registers bots
+                # without knowing (or needing) ownership.
+                row = self._conn.execute(
+                    "SELECT owner_id FROM bots WHERE bot_id = ?", (bot_id,)
+                ).fetchone()
+                owner_id = row[0] if row else None
             self._conn.execute(
-                "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at)"
-                " VALUES (?, ?, ?)",
-                (bot_id, config_to_json(config), time.time()),
+                "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at, owner_id)"
+                " VALUES (?, ?, ?, ?)",
+                (bot_id, config_to_json(config), time.time(), owner_id),
             )
             self._conn.execute(
                 "INSERT OR IGNORE INTO bot_state"
@@ -118,11 +133,11 @@ class StateStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT b.bot_id, b.launch_json, s.state, s.pid, s.start_time,"
-                " s.boot_id FROM bots b"
+                " s.boot_id, b.owner_id FROM bots b"
                 " LEFT JOIN bot_state s ON s.bot_id = b.bot_id ORDER BY b.bot_id"
             ).fetchall()
         result: list[StoredBot] = []
-        for bot_id, launch_json, state, pid, start_time, boot_id in rows:
+        for bot_id, launch_json, state, pid, start_time, boot_id, owner_id in rows:
             identity = None
             if pid is not None and start_time is not None and boot_id is not None:
                 identity = ProcessIdentity(
@@ -134,9 +149,24 @@ class StateStore:
                     config=config_from_stored(launch_json),
                     state=BotState(state) if state else BotState.STOPPED,
                     identity=identity,
+                    owner_id=owner_id,
                 )
             )
         return result
+
+    def set_owner(self, bot_id: str, owner_id: int | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET owner_id = ? WHERE bot_id = ?",
+                (owner_id, bot_id),
+            )
+            self._conn.commit()
+
+    def get_bot(self, bot_id: str) -> StoredBot | None:
+        for bot in self.load_all():
+            if bot.bot_id == bot_id:
+                return bot
+        return None
 
     def remove_bot(self, bot_id: str) -> None:
         with self._lock:

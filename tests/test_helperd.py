@@ -50,6 +50,9 @@ class FakeExecutor:
     def console_resize(self, bot: str, cols: int, rows: int) -> None:
         self.calls.append(("console_resize", (bot, cols, rows)))
 
+    def console_clear_history(self, bot: str) -> None:
+        self.calls.append(("console_clear_history", (bot,)))
+
 
 @pytest.fixture()
 def helper(tmp_path: Path) -> tuple[Helper, FakeExecutor]:

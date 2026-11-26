@@ -112,6 +112,9 @@ class HelperClient:
             {"op": "console_resize", "bot": bot, "cols": cols, "rows": rows}
         )
 
+    def console_clear_history(self, bot: str) -> None:
+        self._call({"op": "console_clear_history", "bot": bot})
+
     def bot_status(
         self, bot: str, identity: ProcessIdentity
     ) -> tuple[bool, int | None]:

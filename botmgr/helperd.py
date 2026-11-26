@@ -98,6 +98,7 @@ class Executor(Protocol):
     def console_snapshot(self, bot: str) -> str: ...
     def console_send(self, bot: str, text: str, enter: bool) -> None: ...
     def console_resize(self, bot: str, cols: int, rows: int) -> None: ...
+    def console_clear_history(self, bot: str) -> None: ...
 
 
 @dataclasses.dataclass
@@ -194,6 +195,11 @@ class Helper:
                 raise RequestError("bad_request", "enter must be a boolean")
             self.executor.console_send(bot, text, enter)
             return {"sent": len(text)}
+        if op == "console_clear_history":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            self.executor.console_clear_history(bot)
+            return {"cleared": True}
         if op == "console_resize":
             _reject_unknown_keys(request, {"op", "bot", "cols", "rows"})
             bot = validate_bot_name(request.get("bot"))
@@ -442,6 +448,11 @@ class SystemExecutor:
         )
         if proc.returncode != 0:
             raise RuntimeError(f"resize-pane failed: {proc.stderr.strip()}")
+
+    def console_clear_history(self, bot: str) -> None:
+        proc = self._tmux(bot, "clear-history", "-t", "main")
+        if proc.returncode != 0:
+            raise RuntimeError(f"clear-history failed: {proc.stderr.strip()}")
 
     def stop_bot(self, bot: str, identity: ProcessIdentity, grace: float) -> int:
         exit_code = self._pane_exit_code(bot)
