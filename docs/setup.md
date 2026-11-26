@@ -94,7 +94,19 @@ limits, are in [systemd.md](systemd.md).
 
 ## 4. First-run setup
 
-1. Open `http://<host>:8000/`. With no administrator existing yet, you
+The manager listens on `127.0.0.1:8000` only — it is not reachable
+from other machines. On the host itself, open
+`http://127.0.0.1:8000/`. From your own machine, use an SSH tunnel
+(this is also the recommended way to reach the panel day to day;
+section 6 explains the alternatives and why a plain rebind is not
+one of them):
+
+```sh
+ssh -L 8000:127.0.0.1:8000 <user>@<host>
+# then open http://127.0.0.1:8000/ in your local browser
+```
+
+1. Open the panel as above. With no administrator existing yet, you
    are redirected to the setup page.
 2. Enter the **setup token**. The installer prints it at the end of
    the run; it is also printed in the manager's log at first start and
@@ -149,6 +161,18 @@ code on this host — a guest's bot is still arbitrary code execution
 as that bot's OS user.
 
 ## 6. TLS and access
+
+The manager binds `127.0.0.1` by default and serves plain HTTP; it
+has no TLS of its own. Keep it that way, and reach it through an SSH
+tunnel (section 4) or a TLS-terminating reverse proxy.
+
+Rebinding is possible — re-run `botmgr systemd install` with
+`--host 0.0.0.0` and restart the manager — but on its own it does not
+give you a working panel: anyone who can route to the host can open
+the login page, credentials travel unencrypted, and because of the
+`Secure` cookies below, the browser will not even keep you signed in
+over plain HTTP at a non-localhost address. Treat a rebind as one
+half of a setup whose other half is TLS in front.
 
 Session cookies are `Secure` by default, so over plain HTTP on a
 non-localhost address the browser will not send them and login will

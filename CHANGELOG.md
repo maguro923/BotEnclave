@@ -8,6 +8,12 @@
 - Removed the quickstart (single-host) layout from the documentation.
   The systemd layout is the one supported setup, and the installer
   script performs it.
+- Documentation: the setup guide and both READMEs now state the
+  loopback-only bind up front instead of sending the reader to
+  `http://<host>:8000/`, present the SSH tunnel as the recommended
+  way in, and spell out why rebinding alone is not a working setup
+  (login page reachable, but credentials unencrypted and `Secure`
+  cookies dropped over plain HTTP at a non-localhost address).
 - Fixed a pre-UI-change bug-hunt pass (37 new regression tests):
   supervision now survives one bot's helper failure instead of stopping
   for every bot, and a failed stop stays retryable; the manager group
