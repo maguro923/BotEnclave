@@ -203,12 +203,8 @@ then `sudo systemctl restart botenclave` and open
 `https://<server-address>:8000/`. Once the list admits anything
 beyond loopback, the panel listens on all interfaces and enforces
 the list itself: unlisted clients receive 403 before any login
-logic runs. Entries may be single IP addresses, CIDR ranges
-(`192.168.0.0/24`), or MAC addresses (`aa:bb:cc:dd:ee:ff`). A MAC
-entry is matched through the kernel ARP table, so it only applies
-to IPv4 clients on the same subnet, and a MAC is trivially
-spoofable on a LAN — treat it as a convenience identifier for a
-home network, never as authentication.
+logic runs. Entries may be single IP addresses or CIDR ranges
+(`192.168.0.0/24`).
 
 `allow_all = true` disables the restriction entirely: any machine
 that can route to this host — including, behind a router port

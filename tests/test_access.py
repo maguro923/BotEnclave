@@ -11,15 +11,10 @@ from fastapi.testclient import TestClient
 from botmgr.access import (
     AccessConfig,
     AccessConfigError,
-    ArpTable,
     load_access_config,
     parse_access_config,
 )
 from botmgr.app import AppConfig, create_app
-
-
-def NO_MAC(ip: str) -> None:
-    return None
 
 
 def test_default_file_created_loopback_only(tmp_path: Path) -> None:
@@ -30,26 +25,23 @@ def test_default_file_created_loopback_only(tmp_path: Path) -> None:
     assert config.allow_all is False
     assert config.networks == ()
     assert config.opens_network() is False
-    assert config.allows("127.0.0.1", NO_MAC)
-    assert config.allows("::1", NO_MAC)
-    assert not config.allows("192.168.0.10", NO_MAC)
-    assert not config.allows(None, NO_MAC)
-    assert not config.allows("testclient", NO_MAC)
+    assert config.allows("127.0.0.1")
+    assert config.allows("::1")
+    assert not config.allows("192.168.0.10")
+    assert not config.allows(None)
+    assert not config.allows("testclient")
 
 
 def test_parse_entries_and_opens_network() -> None:
     config = parse_access_config(
-        {"allow": ["192.168.0.10", "10.0.0.0/8", "AA-BB-CC-DD-EE-FF"]}, "t"
+        {"allow": ["192.168.0.10", "10.0.0.0/8"]}, "t"
     )
     assert config.opens_network() is True
-    assert config.allows("192.168.0.10", NO_MAC)
-    assert config.allows("10.1.2.3", NO_MAC)
-    assert not config.allows("192.168.0.11", NO_MAC)
+    assert config.allows("192.168.0.10")
+    assert config.allows("10.1.2.3")
+    assert not config.allows("192.168.0.11")
     # IPv4-mapped IPv6 peers match IPv4 entries.
-    assert config.allows("::ffff:192.168.0.10", NO_MAC)
-    # MAC entries match through the resolver, normalized.
-    assert config.allows("192.168.0.77", lambda ip: "aa:bb:cc:dd:ee:ff")
-    assert not config.allows("192.168.0.77", lambda ip: "00:11:22:33:44:55")
+    assert config.allows("::ffff:192.168.0.10")
 
 
 def test_loopback_only_list_does_not_open_network() -> None:
@@ -60,13 +52,14 @@ def test_loopback_only_list_does_not_open_network() -> None:
 def test_allow_all() -> None:
     config = parse_access_config({"allow_all": True}, "t")
     assert config.opens_network() is True
-    assert config.allows("203.0.113.9", NO_MAC)
+    assert config.allows("203.0.113.9")
 
 
 @pytest.mark.parametrize(
     "data",
     [
         {"allow": ["not-an-address"]},
+        {"allow": ["aa:bb:cc:dd:ee:ff"]},
         {"allow": ["192.168.0.0/33"]},
         {"allow": [42]},
         {"allow": "192.168.0.10"},
@@ -83,21 +76,6 @@ def test_malformed_file_fails_closed(tmp_path: Path) -> None:
     (tmp_path / "access.toml").write_text("allow = [", encoding="utf-8")
     with pytest.raises(AccessConfigError):
         load_access_config(tmp_path)
-
-
-def test_arp_table_parsing(tmp_path: Path) -> None:
-    arp = tmp_path / "arp"
-    arp.write_text(
-        "IP address       HW type     Flags       HW address            Mask     Device\n"
-        "192.168.0.10     0x1         0x2         AA:BB:CC:DD:EE:FF     *        eth0\n"
-        "192.168.0.11     0x1         0x0         00:00:00:00:00:00     *        eth0\n",
-        encoding="utf-8",
-    )
-    table = ArpTable(path=str(arp))
-    assert table.mac_for("192.168.0.10") == "aa:bb:cc:dd:ee:ff"
-    # Incomplete entries (flags without ATF_COM) do not count.
-    assert table.mac_for("192.168.0.11") is None
-    assert table.mac_for("192.168.0.99") is None
 
 
 def _client(tmp_path: Path, peer: str, config: AccessConfig) -> TestClient:
