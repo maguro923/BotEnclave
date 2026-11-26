@@ -7,6 +7,7 @@ root or tmux.
 
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ class FakeHelper:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.users: set[str] = set()
+        self.purged: list[str] = []
         self.running: dict[str, dict[str, Any]] = {}
         self.capture: dict[str, bool] = {}
         self.cleared: list[str] = []
@@ -53,6 +55,10 @@ class FakeHelper:
             self.users.discard(bot)
             self.running.pop(bot, None)
             result = {"user": f"bm-{bot}"}
+        elif op == "delete_bot_files":
+            self.purged.append(bot)
+            shutil.rmtree(self._bot_root(bot), ignore_errors=True)
+            result = {"removed": bot}
         elif op == "ensure_layout":
             for sub in ("releases", "venvs"):
                 (self._bot_root(bot) / sub).mkdir(parents=True, exist_ok=True)
@@ -672,3 +678,24 @@ def test_bot_create_does_not_confirm_other_users_bot_names(
         "/api/bots", json={"name": "shared-name", "command": ["python3", "bot.py"]}
     )
     assert resp.status_code == 409
+
+
+def test_bot_delete_keeps_files_by_default_and_purges_on_request(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    bot_dir = root / "bots" / "alpha"
+    assert bot_dir.exists()
+
+    resp = admin.delete("/api/bots/alpha")
+    assert resp.status_code == 200, resp.text
+    assert fake.purged == []
+    assert bot_dir.exists()  # files are kept unless the operator chooses
+
+    create_bot(admin, "alpha")
+    resp = admin.delete("/api/bots/alpha?purge_files=true")
+    assert resp.status_code == 200, resp.text
+    assert fake.purged == ["alpha"]
+    assert not bot_dir.exists()

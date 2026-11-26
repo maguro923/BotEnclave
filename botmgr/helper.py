@@ -53,6 +53,9 @@ class HelperClient:
         result = self._call({"op": "delete_user", "bot": bot})
         return str(result["user"])
 
+    def delete_bot_files(self, bot: str) -> None:
+        self._call({"op": "delete_bot_files", "bot": bot})
+
     def start_bot(self, bot: str, config: LaunchConfig) -> ProcessIdentity:
         launch: dict[str, Any] = {
             "command": list(config.command),

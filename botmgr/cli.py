@@ -226,9 +226,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--env", action="append", default=[])
     p.add_argument("bot_command", nargs=argparse.REMAINDER)
 
-    for name in ("bot-start", "bot-stop", "bot-status", "bot-remove"):
+    for name in ("bot-start", "bot-stop", "bot-status"):
         p = sub.add_parser(name)
         p.add_argument("bot")
+    p = sub.add_parser("bot-remove")
+    p.add_argument("bot")
+    p.add_argument("--purge-files", action="store_true")
     sub.add_parser("bot-list")
     p = sub.add_parser("watch")
     p.add_argument("--interval", type=float, default=5.0)
@@ -386,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "bot-remove":
             if supervisor.state(args.bot).value not in ("stopped", "attention"):
                 supervisor.stop(args.bot)
+            supervisor.unregister(args.bot)
             runtime.store.remove_bot(args.bot)
             # Match the web delete path: the bot's secret artifacts and
             # webhook secret must not survive, or a later bot reusing
@@ -395,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
 
             SecretsService(args.root, runtime.store).delete(args.bot)
             WebhookSecrets(args.root).delete(args.bot)
+            if args.purge_files:
+                runtime.client.delete_bot_files(args.bot)
             print(f"removed {args.bot}")
         elif args.command == "bot-list":
             supervisor.tick()

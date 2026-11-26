@@ -19,6 +19,9 @@ class FakeExecutor:
     def delete_user(self, bot: str) -> None:
         self.calls.append(("delete_user", (bot,)))
 
+    def delete_bot_files(self, bot: str) -> None:
+        self.calls.append(("delete_bot_files", (bot,)))
+
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity:
         self.calls.append(("start_bot", (bot, launch)))
         return IDENT
@@ -347,3 +350,39 @@ def test_start_bot_fifo_removed_when_new_session_raises(tmp_path: Path) -> None:
     with pytest.raises(sp.TimeoutExpired):
         executor.start_bot("alpha", {"command": ["python3", "bot.py"], "env": {}})
     assert list(data_dir.glob(".launch-*.fifo")) == []
+
+
+def test_delete_bot_files_dispatch(
+    helper: tuple[Helper, FakeExecutor],
+) -> None:
+    h, ex = helper
+    resp = h.handle({"op": "delete_bot_files", "bot": "alpha"})
+    assert resp["ok"] is True, resp
+    assert ("delete_bot_files", ("alpha",)) in ex.calls
+
+
+def test_system_executor_delete_bot_files(tmp_path: Path) -> None:
+    from botmgr.helperd import SystemExecutor
+
+    executor = SystemExecutor(tmp_path)
+    bot_dir = tmp_path / "bots" / "alpha"
+    (bot_dir / "data").mkdir(parents=True)
+    (bot_dir / "data" / "state.json").write_text("{}", encoding="utf-8")
+    executor.delete_bot_files("alpha")
+    assert not bot_dir.exists()
+    executor.delete_bot_files("alpha")  # already gone: no-op, no error
+
+
+def test_system_executor_delete_bot_files_refuses_symlink(tmp_path: Path) -> None:
+    from botmgr.helperd import SystemExecutor
+
+    executor = SystemExecutor(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    bots = tmp_path / "bots"
+    bots.mkdir()
+    (bots / "alpha").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError):
+        executor.delete_bot_files("alpha")
+    assert (outside / "keep.txt").exists()

@@ -19,6 +19,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,7 @@ def _reject_unknown_keys(request: dict[str, object], allowed: set[str]) -> None:
 class Executor(Protocol):
     def create_user(self, bot: str) -> None: ...
     def delete_user(self, bot: str) -> None: ...
+    def delete_bot_files(self, bot: str) -> None: ...
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity: ...
     def stop_bot(self, bot: str, identity: ProcessIdentity, grace: float) -> int: ...
     def bot_status(
@@ -157,6 +159,11 @@ class Helper:
             bot = validate_bot_name(request.get("bot"))
             self.executor.delete_user(bot)
             return {"user": username_for(bot)}
+        if op == "delete_bot_files":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            self.executor.delete_bot_files(bot)
+            return {"removed": bot}
         if op == "start_bot":
             _reject_unknown_keys(request, {"op", "bot", "launch"})
             bot = validate_bot_name(request.get("bot"))
@@ -369,6 +376,17 @@ class SystemExecutor:
             proc = _run(["userdel", user])
             if proc.returncode != 0:
                 raise RuntimeError(f"userdel failed: {proc.stderr.strip()}")
+
+    def delete_bot_files(self, bot: str) -> None:
+        bots_root = (self.root / "bots").resolve()
+        target = bots_root / bot
+        if target.parent != bots_root:
+            raise RuntimeError(f"bot directory escapes the bots tree: {target}")
+        if target.is_symlink():
+            # Never follow or remove through a link planted in the tree.
+            raise RuntimeError(f"refusing to remove symlinked bot directory: {target}")
+        if target.exists():
+            shutil.rmtree(target)
 
     # -- tmux / process control ---------------------------------------------
     def _tmux(self, bot: str, *args: str) -> subprocess.CompletedProcess[str]:

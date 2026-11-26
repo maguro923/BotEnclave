@@ -442,6 +442,7 @@ def create_app(config: AppConfig) -> FastAPI:
     async def delete_bot(
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
+        purge_files: bool = False,
     ) -> dict[str, str]:
         bot = stored.bot_id
 
@@ -449,13 +450,20 @@ def create_app(config: AppConfig) -> FastAPI:
             if supervisor.state(bot).value not in ("stopped", "attention"):
                 with contextlib.suppress(Exception):
                     supervisor.stop(bot)
+            supervisor.unregister(bot)
             store.remove_bot(bot)
             secrets_service.delete(bot)
             webhook_secrets.delete(bot)
             client.delete_user(bot)
+            if purge_files:
+                # PLAN 2.4: file handling is the operator's choice in
+                # the delete flow. Kept by default (data outlives the
+                # registration); purging removes the whole bot tree so
+                # a reused name cannot inherit the previous bot's files.
+                client.delete_bot_files(bot)
 
         await run_in_threadpool(do_delete)
-        audit.record(user.email, "bot.delete", bot)
+        audit.record(user.email, "bot.delete", bot, f"purge_files={purge_files}")
         return {"status": "ok"}
 
     @app.post("/api/bots/{bot_id}/start")
@@ -967,6 +975,7 @@ def create_app(config: AppConfig) -> FastAPI:
                     if supervisor.state(bot_id).value not in ("stopped", "attention"):
                         with contextlib.suppress(Exception):
                             supervisor.stop(bot_id)
+                    supervisor.unregister(bot_id)
                     store.remove_bot(bot_id)
                     secrets_service.delete(bot_id)
                     webhook_secrets.delete(bot_id)

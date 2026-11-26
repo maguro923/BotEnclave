@@ -78,6 +78,12 @@ class Supervisor:
     def bot_ids(self) -> list[str]:
         return sorted(self._bots)
 
+    def unregister(self, bot_id: str) -> None:
+        # The removal counterpart of register(): the caller removes the
+        # store row; this drops the live entry so tick() stops polling
+        # the bot and the name can be registered again in this process.
+        self._bots.pop(bot_id, None)
+
     def _persist(self, bot_id: str, entry: _BotEntry) -> None:
         if self._store is not None:
             self._store.save_state(bot_id, entry.machine.state, entry.identity)

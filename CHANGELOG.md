@@ -8,7 +8,7 @@
 - Removed the quickstart (single-host) layout from the documentation.
   The systemd layout is the one supported setup, and the installer
   script performs it.
-- Fixed a pre-UI-change bug-hunt pass (32 new regression tests):
+- Fixed a pre-UI-change bug-hunt pass (37 new regression tests):
   supervision now survives one bot's helper failure instead of stopping
   for every bot, and a failed stop stays retryable; the manager group
   is wired into bot directory ownership so the panel can read bot logs
@@ -28,7 +28,12 @@
   the bot user; secret backend migration cannot strand a bot with an
   empty environment; backup restore sanitizes manifest paths; the
   Fernet key is created atomically; `bot-remove` (CLI) deletes the
-  bot's secrets like the web path does.
+  bot's secrets like the web path does; deleting a bot unregisters it
+  from the supervisor, so the watchdog stops polling it and its name
+  can be reused without restarting the manager; the delete flow now
+  offers the file-handling choice PLAN 2.4 calls for (files kept by
+  default, `?purge_files=true` / `--purge-files` removes the bot's
+  whole directory tree through the helper).
 
 ## 0.1.0 — 2026-11-26
 

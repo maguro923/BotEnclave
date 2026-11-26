@@ -166,3 +166,17 @@ def test_failed_stop_leaves_bot_retryable() -> None:
     sup.stop("alpha")  # retry succeeds against the same identity
     assert sup.state("alpha") is BotState.STOPPED
     assert sup.identity("alpha") is None
+
+
+def test_unregister_allows_name_reuse_and_stops_polling() -> None:
+    sup, _backend, _clock = make_supervisor()
+    sup.start("alpha")
+    assert sup.state("alpha") is BotState.RUNNING
+    sup.unregister("alpha")
+    assert sup.bot_ids() == []
+    with pytest.raises(KeyError):
+        sup.state("alpha")
+    sup.tick()  # the removed bot is no longer polled
+    sup.register("alpha", CONFIG)  # the name is free again
+    assert sup.bot_ids() == ["alpha"]
+    sup.unregister("missing")  # unknown name: no-op, no error
