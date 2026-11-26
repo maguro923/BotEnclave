@@ -139,3 +139,34 @@ def test_env_round_trip_survives_splitlines_characters() -> None:
         "QUOTED": "x\u2028y\x85z",
     }
     assert parse_env_text(format_env_text(env)) == env
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"not json",
+        b'["python3"]',
+        b'{"command": "python3 bot.py", "cwd": "/x"}',
+        b'{"command": ["python3", 3], "cwd": "/x"}',
+        b'{"command": ["python3"]}',
+        b'{"command": ["python3"], "cwd": ""}',
+        b'{"command": ["python3"], "cwd": "/x", "env_text": 5}',
+        b'{"command": ["python3"], "cwd": "/x", "env": {"A": 1}}',
+        b'{"command": ["python3"], "cwd": "/x", "rlimits": []}',
+        b'{"command": ["python3"], "cwd": "/x", "rlimits": {"nofile": 0}}',
+        b'{"command": ["python3"], "cwd": "/x", "rlimits": {"nofile": -3}}',
+        b'{"command": ["python3"], "cwd": "/x", "rlimits": {"nproc": "many"}}',
+    ],
+)
+def test_config_from_json_rejects_invalid_configs(raw: bytes) -> None:
+    with pytest.raises((ValueError, TypeError)):
+        config_from_json(raw)
+
+
+def test_config_from_json_accepts_rlimits() -> None:
+    config = config_from_json(
+        b'{"command": ["python3"], "cwd": "/x",'
+        b' "rlimits": {"nofile": 1024, "nproc": 64}}'
+    )
+    assert config.rlimit_nofile == 1024
+    assert config.rlimit_nproc == 64

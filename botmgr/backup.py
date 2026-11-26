@@ -131,7 +131,13 @@ def _safe_member_name(name: str) -> str:
     return "/".join(parts)
 
 
-def restore_backup(archive: Path, root: Path, *, force: bool = False) -> list[str]:
+def restore_backup(
+    archive: Path,
+    root: Path,
+    *,
+    force: bool = False,
+    warnings: list[str] | None = None,
+) -> list[str]:
     if (root / "botmgr.db").exists() and not force:
         raise BackupError(
             f"{root} already contains an installation; pass force to replace it"
@@ -195,4 +201,109 @@ def restore_backup(archive: Path, root: Path, *, force: bool = False) -> list[st
         for name in ("secret.key", "web-secret"):
             if (root / name).exists():
                 (root / name).chmod(0o600)
+        _reapply_layout(root, warnings if warnings is not None else [])
         return restored
+
+
+def _reapply_layout(root: Path, warnings: list[str]) -> None:
+    """Re-apply the OS-side layout a backup cannot carry: per-bot OS
+    users, ownership and the permission model (PLAN 2.4).
+
+    Restored files land owned by whoever ran the restore, with
+    umask-default modes — bots/<bot>/data would come back world-
+    readable instead of 0700, and on a fresh host the bm-<bot> users
+    do not exist at all, so no bot could start. Running as root, this
+    recreates the users through the helper's own executor (the same
+    code that builds the layout at bot creation) and hands the file
+    contents back to them. Anything that cannot be re-applied is
+    reported as a warning, never silently skipped.
+    """
+    bots_dir = root / "bots"
+    bots = (
+        sorted(p.name for p in bots_dir.iterdir() if p.is_dir())
+        if bots_dir.is_dir()
+        else []
+    )
+    if os.geteuid() != 0:
+        if bots:
+            warnings.append(
+                "OS layout not re-applied (restore is not running as"
+                " root): per-bot users, ownership and permissions must"
+                " be restored manually"
+            )
+        return
+    import grp
+    import pwd
+
+    from botmgr.helperd import SystemExecutor
+
+    root_stat = root.stat()
+    manager_group: str | None = None
+    if root_stat.st_uid != 0:
+        # Same-host restore: the data root still belongs to the
+        # manager user, so restored top-level files go back to that
+        # owner and the manager's group is the layout's group.
+        try:
+            manager_group = grp.getgrgid(root_stat.st_gid).gr_name
+        except KeyError:
+            manager_group = None
+        for entry in root.iterdir():
+            if entry.name == "bots":
+                continue
+            _chown_tree(entry, root_stat.st_uid, root_stat.st_gid)
+    elif bots:
+        warnings.append(
+            "data root is owned by root: chown it to the manager user"
+            " before starting the panel"
+        )
+    executor = SystemExecutor(root, manager_group=manager_group)
+    for bot in bots:
+        try:
+            executor.create_user(bot)
+            bot_entry = pwd.getpwnam(f"bm-{bot}")
+            bot_dir = bots_dir / bot
+            _fix_contents(
+                bot_dir / "data", bot_entry.pw_uid, bot_entry.pw_gid, 0o700, 0o600
+            )
+            logs = bot_dir / "logs"
+            logs_gid = logs.stat().st_gid if logs.exists() else bot_entry.pw_gid
+            _fix_contents(logs, bot_entry.pw_uid, logs_gid, 0o750, 0o640)
+            releases = bot_dir / "releases"
+            if releases.is_dir():
+                for release in sorted(p.name for p in releases.iterdir()):
+                    try:
+                        executor.publish_release(bot, release)
+                    except Exception as exc:  # noqa: BLE001 - warn, continue
+                        warnings.append(
+                            f"release {release} of bot {bot} was not"
+                            f" re-published: {exc}"
+                        )
+        except Exception as exc:  # noqa: BLE001 - warn, continue
+            warnings.append(f"layout for bot {bot} was not re-applied: {exc}")
+
+
+def _chown_tree(path: Path, uid: int, gid: int) -> None:
+    if path.is_symlink():
+        return
+    os.chown(path, uid, gid, follow_symlinks=False)
+    if path.is_dir():
+        for child in path.iterdir():
+            _chown_tree(child, uid, gid)
+
+
+def _fix_contents(
+    base: Path, uid: int, gid: int, dir_mode: int, file_mode: int
+) -> None:
+    if not base.is_dir():
+        return
+    for dirpath, _dirnames, filenames in os.walk(base):
+        current = Path(dirpath)
+        if current != base:
+            os.chown(current, uid, gid, follow_symlinks=False)
+            os.chmod(current, dir_mode, follow_symlinks=False)
+        for name in filenames:
+            target = current / name
+            if target.is_symlink():
+                continue
+            os.chown(target, uid, gid, follow_symlinks=False)
+            os.chmod(target, file_mode, follow_symlinks=False)

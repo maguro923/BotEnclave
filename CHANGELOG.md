@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fixed: restoring a backup did not restore the OS-side layout.
+  Restored files were owned by whoever ran the restore with default
+  permissions (a bot's `data/` came back world-readable instead of
+  0700), and on a fresh host the per-bot OS users did not exist, so
+  no restored bot could start. A restore run as root now re-applies
+  users, ownership and permissions for every restored bot and
+  reports anything it could not re-apply as a warning.
+
 - Fixed: deploy activation failed with `Permission denied`
   (Errno 13) after a successful build. Switching the `current`
   symlink happens inside the bot-owned folder, which the manager

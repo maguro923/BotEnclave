@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import tarfile
 import time
 from pathlib import Path
@@ -125,3 +126,54 @@ def test_restore_rejects_traversing_manifest_keys(tmp_path: Path) -> None:
     with pytest.raises(BackupError):
         restore_backup(archive, dest)
     assert not (tmp_path / "evil.txt").exists()
+
+
+def test_restore_warns_when_layout_cannot_be_reapplied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "live"
+    root.mkdir()
+    build_root(root)
+    archive = create_backup(root, tmp_path / "backups")
+    target = tmp_path / "restored"
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    warnings: list[str] = []
+    restored = restore_backup(archive, target, warnings=warnings)
+    assert "botmgr.db" in restored
+    assert any("OS layout not re-applied" in w for w in warnings)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="layout re-apply needs root")
+def test_restore_reapplies_layout_as_root(tmp_path: Path) -> None:
+    import pwd
+    import subprocess
+
+    bot = "rstbot"
+    user = f"bm-{bot}"
+    subprocess.run(["userdel", user], check=False, capture_output=True)
+    root = tmp_path / "live"
+    root.mkdir()
+    store = StateStore(root / "botmgr.db")
+    store.register_bot(
+        bot, LaunchConfig(("python3", "bot.py"), str(root / "bots" / bot / "data"), {})
+    )
+    store.close()
+    data = root / "bots" / bot / "data"
+    data.mkdir(parents=True)
+    (data / ".env").write_text("DISCORD_TOKEN=x\n", encoding="utf-8")
+    archive = create_backup(root, tmp_path / "backups")
+    target = tmp_path / "restored"
+    try:
+        warnings: list[str] = []
+        restore_backup(archive, target, warnings=warnings)
+        # The target root is root-owned here, so the manager-side
+        # hand-back is reported instead of applied.
+        assert any("owned by root" in w for w in warnings)
+        entry = pwd.getpwnam(user)  # the OS user was recreated
+        env_file = target / "bots" / bot / "data" / ".env"
+        st = env_file.stat()
+        assert st.st_uid == entry.pw_uid
+        assert st.st_mode & 0o777 == 0o600
+        assert (target / "bots" / bot / "data").stat().st_mode & 0o777 == 0o700
+    finally:
+        subprocess.run(["userdel", user], check=False, capture_output=True)

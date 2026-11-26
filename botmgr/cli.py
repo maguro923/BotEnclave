@@ -306,12 +306,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "restore":
         from botmgr.backup import BackupError, restore_backup
 
+        restore_warnings: list[str] = []
         try:
-            restored = restore_backup(args.archive, args.root, force=args.force)
+            restored = restore_backup(
+                args.archive, args.root, force=args.force, warnings=restore_warnings
+            )
         except BackupError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         print(f"restored {len(restored)} files into {args.root}")
+        for warning in restore_warnings:
+            print(f"warning: {warning}", file=sys.stderr)
         return 0
     if args.command == "systemd":
         return _systemd_command(args)

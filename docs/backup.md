@@ -35,8 +35,12 @@ unless `--force` is given (the old tree is then moved aside to
 `<root>.pre-restore-<timestamp>`, never deleted), and restores
 owner-only permissions on the secret material.
 
-After a restore, restart the manager. Bots that were running are
-reconciled on startup as usual.
+Run the restore as root: a backup cannot carry OS users, ownership
+or permissions, so the restore re-applies them for every restored
+bot (recreating any missing `bm-<bot>` user and handing `data/` and
+`logs/` back under the usual permission model). Anything it cannot
+re-apply is printed as a warning. After a restore, restart the
+manager. Bots that were running are reconciled on startup as usual.
 
 ## The systemd-creds host-binding caveat
 
