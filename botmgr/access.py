@@ -6,8 +6,10 @@ machines by listing their IP addresses or CIDR ranges in
 ``<root>/access.toml``, or can disable the restriction entirely
 with ``allow_all``. Editing is a terminal operation on purpose:
 there is no web-UI path to widen access. The file is created with
-mode 600 on first start, and a malformed file fails startup rather
-than falling back to something more open (fail closed).
+mode 600 on first start. A malformed file never widens access:
+``serve`` falls back to the loopback-only policy (and logs the
+error prominently) rather than taking the panel down, while the
+strict loader behind `botmgr access` reports the error and fails.
 
 When the list admits non-loopback clients, ``serve`` also widens
 its bind to all interfaces; enforcement itself is independent of
@@ -110,6 +112,23 @@ def parse_access_config(data: dict[str, object], source: str) -> AccessConfig:
                 "(expected an IP address or CIDR range)"
             ) from None
     return AccessConfig(allow_all=allow_all, networks=tuple(networks))
+
+
+def load_access_config_lenient(root: Path) -> tuple[AccessConfig, str | None]:
+    """Load, but fall back to loopback-only on a malformed file.
+
+    Used by ``serve``: a typo in access.toml must not take the panel
+    down entirely (the administrator may need the panel — and at
+    minimum a running service — to notice and fix it). The fallback
+    is the most restrictive policy, so it can only ever be *more*
+    closed than what the administrator intended, never more open.
+    Returns the error text alongside so the caller can log it loudly.
+    The strict loader remains for validation (`botmgr access`).
+    """
+    try:
+        return load_access_config(root), None
+    except AccessConfigError as exc:
+        return AccessConfig(), str(exc)
 
 
 def load_access_config(root: Path) -> AccessConfig:

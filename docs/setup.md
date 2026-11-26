@@ -187,9 +187,14 @@ The panel always answers on loopback. Which *other* machines may
 reach it is controlled by `<root>/access.toml` — created on first
 start with mode 600, owned by the manager user, editable only from
 a terminal (there is deliberately no web-UI path), applied at
-restart. A malformed file makes startup fail rather than fall back
-to anything more open. `botmgr --root /srv/botenclave access`
-prints the effective policy.
+restart. After editing, validate before restarting:
+`botmgr --root /srv/botenclave access` prints the effective policy
+or the exact parse error. If the manager is restarted with a
+malformed file anyway, it does not fail and never opens wider — it
+falls back to loopback-only and logs the error prominently, so the
+panel stays reachable from the host while you fix the file. Note
+that TOML strings need quotes: `allow = ["192.168.0.10"]`, not
+`allow = [192.168.0.10]`.
 
 By default the list is empty and the panel does not listen on
 network interfaces at all. To let your own PC in — the usual setup

@@ -12,6 +12,7 @@ from botmgr.access import (
     AccessConfig,
     AccessConfigError,
     load_access_config,
+    load_access_config_lenient,
     parse_access_config,
 )
 from botmgr.app import AppConfig, create_app
@@ -76,6 +77,30 @@ def test_malformed_file_fails_closed(tmp_path: Path) -> None:
     (tmp_path / "access.toml").write_text("allow = [", encoding="utf-8")
     with pytest.raises(AccessConfigError):
         load_access_config(tmp_path)
+
+
+def test_lenient_loader_falls_back_to_loopback_only(tmp_path: Path) -> None:
+    (tmp_path / "access.toml").write_text(
+        "allow = [192.168.0.200]\n", encoding="utf-8"
+    )
+    config, error = load_access_config_lenient(tmp_path)
+    assert error is not None and "cannot parse" in error
+    # The fallback is the most restrictive policy: loopback only,
+    # and it does not widen the bind.
+    assert config.allow_all is False
+    assert config.networks == ()
+    assert config.opens_network() is False
+    assert config.allows("127.0.0.1")
+    assert not config.allows("192.168.0.200")
+
+
+def test_lenient_loader_passes_through_valid_config(tmp_path: Path) -> None:
+    (tmp_path / "access.toml").write_text(
+        'allow = ["192.168.0.10"]\n', encoding="utf-8"
+    )
+    config, error = load_access_config_lenient(tmp_path)
+    assert error is None
+    assert config.allows("192.168.0.10")
 
 
 def _client(tmp_path: Path, peer: str, config: AccessConfig) -> TestClient:

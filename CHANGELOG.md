@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed: a malformed `access.toml` (for example an unquoted IP
+  address) made the manager exit and systemd restart it in a loop,
+  taking the panel down entirely — including on loopback. The
+  manager now falls back to the loopback-only policy and logs the
+  parse error prominently; the fallback can only be more
+  restrictive than intended, never more open. `botmgr access`
+  remains strict and is the documented way to validate the file
+  before restarting.
+
 - Added: panel access control via `<root>/access.toml` (mode 600,
   terminal-edited, applied at restart, fail-closed on malformed
   input). Loopback is always allowed; the `allow` list admits

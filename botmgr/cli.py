@@ -338,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
 
         import uvicorn
 
-        from botmgr.access import AccessConfigError, load_access_config
+        from botmgr.access import load_access_config_lenient
         from botmgr.app import AppConfig, create_app
         from botmgr.tls import cert_fingerprint, ensure_tls_material
 
@@ -348,12 +348,17 @@ def main(argv: list[str] | None = None) -> int:
                 " expose this instance directly (PLAN 3.2)",
                 file=sys.stderr,
             )
-        try:
-            access = load_access_config(args.root)
-        except AccessConfigError as exc:
-            # Fail closed: a malformed access.toml never widens access.
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+        access, access_error = load_access_config_lenient(args.root)
+        if access_error is not None:
+            # Never widen, never take the panel down: fall back to
+            # loopback-only and say so loudly (PLAN: a single failure
+            # must not stop the panel).
+            print(f"error: {access_error}", file=sys.stderr)
+            print(
+                "access: falling back to loopback-only until access.toml"
+                f" is fixed (validate with: botmgr --root {args.root} access)",
+                file=sys.stderr,
+            )
         # HTTPS only: a self-signed certificate is generated on first
         # start. There is no HTTP listener — plain HTTP to the port is
         # refused by the TLS handshake, not redirected.
