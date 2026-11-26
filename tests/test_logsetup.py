@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 
-import botmgr.logsetup as logsetup
+from botmgr import logsetup
 from botmgr.logsetup import configure_logging, uvicorn_log_config
 
 

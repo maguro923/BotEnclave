@@ -126,6 +126,7 @@ disk.
 - [docs/systemd.md](docs/systemd.md) — production install with systemd
 - [docs/backup.md](docs/backup.md) — backup, restore, audit retention
 - [docs/upgrading.md](docs/upgrading.md) — upgrading without stopping bots
+- [docs/uninstall.md](docs/uninstall.md) — uninstalling, with and without data removal
 - [SECURITY.md](SECURITY.md) — reporting vulnerabilities, threat model summary
 
 ## Development

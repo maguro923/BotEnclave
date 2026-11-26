@@ -126,6 +126,7 @@ dotenv 互換モードもあります。平文がディスクに残るため既�
 - [docs/systemd.md](docs/systemd.md) — systemd による本番導入
 - [docs/backup.md](docs/backup.md) — バックアップ、リストア、監査の保持
 - [docs/upgrading.md](docs/upgrading.md) — Bot を止めないアップグレード
+- [docs/uninstall.md](docs/uninstall.md) — アンインストール（データ保持と完全削除）
 - [SECURITY.md](SECURITY.md) — 脆弱性の報告方法と脅威モデルの要約
 
 ## 開発
