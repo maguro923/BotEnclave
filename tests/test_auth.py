@@ -27,7 +27,7 @@ def app_and_service(tmp_path: Path) -> tuple[FastAPI, AuthService]:
 
 
 def make_client(app: FastAPI) -> TestClient:
-    return TestClient(app)
+    return TestClient(app, client=("127.0.0.1", 50000))
 
 
 def do_setup(client: TestClient) -> None:

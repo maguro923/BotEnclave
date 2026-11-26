@@ -42,6 +42,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
+from botmgr.access import AccessConfig, AccessMiddleware
 from botmgr.audit import AuditLog, AuditMirror
 from botmgr.auth.deps import AuthBundle, build_auth, init_auth_db
 from botmgr.auth.models import User
@@ -93,6 +94,9 @@ class AppConfig:
     guest_max_disk_bytes: int = 1 << 30
     audit_retention_days: int = 180
     bot_runtime: str = "helper"
+    # Client allowlist for the panel itself (botmgr.access). The
+    # default admits loopback only.
+    access: AccessConfig = field(default_factory=AccessConfig)
 
 
 def authorize(user: User, stored: StoredBot | None) -> StoredBot:
@@ -260,6 +264,7 @@ def create_app(config: AppConfig) -> FastAPI:
             lock_fd.close()
 
     app = FastAPI(title="BotEnclave", lifespan=lifespan)
+    app.add_middleware(AccessMiddleware, config=config.access)
 
     @app.middleware("http")
     async def csrf_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]

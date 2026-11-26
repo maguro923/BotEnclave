@@ -138,12 +138,12 @@ def env(tmp_path: Path) -> tuple[TestClient, FakeHelper, Path]:
             transport_override=fake,
         )
     )
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         yield client, fake, tmp_path
 
 
 def login(client: TestClient, email: str, password: str) -> TestClient:
-    user_client = TestClient(client.app)  # type: ignore[arg-type]
+    user_client = TestClient(client.app, client=("127.0.0.1", 50000))  # type: ignore[arg-type]
     resp = user_client.post(
         "/auth/login", json={"email": email, "password": password}
     )
@@ -431,7 +431,7 @@ def test_memory_backend_secret_pending_after_restart(tmp_path: Path) -> None:
                 transport_override=fake,
             )
         )
-        return TestClient(app), fake
+        return TestClient(app, client=("127.0.0.1", 50000)), fake
 
     client1, fake1 = build()
     with client1:
@@ -608,7 +608,7 @@ def test_guest_bot_quota(tmp_path: Path) -> None:
             guest_max_bots=1,
         )
     )
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         admin = setup_admin(client, tmp_path)
         guest_a = invite_and_login(admin, client, GUEST_A)
         create_bot(guest_a, "only")

@@ -112,6 +112,11 @@ host and never leaves it, and its SHA-256 fingerprint is printed in
 the manager's log at startup if you want to compare
 (`journalctl -u botenclave | grep tls:`).
 
+On a headless server the tunnel may not be the most convenient
+route: you can instead whitelist your own machine's address in
+`access.toml` and open `https://<server-address>:8000/` directly —
+see section 6.
+
 1. Open the panel as above. With no administrator existing yet, you
    are redirected to the setup page.
 2. Enter the **setup token**. The installer prints it at the end of
@@ -176,18 +181,49 @@ at generation time). Plain HTTP is not served at all: an `http://`
 request to the port is refused by the TLS handshake, not
 redirected.
 
-The manager binds `127.0.0.1` by default. Reach it on the host
-itself, through an SSH tunnel (section 4), or behind a reverse
-proxy. Because the panel now speaks HTTPS itself, rebinding is
-also a workable option: re-run `botmgr systemd install` with
-`--host 0.0.0.0` (or a specific address), restart, and the panel
-answers at `https://<host>:8000/`. Expect the browser's
-self-signed warning, anyone who can route to the host can open the
-login page, and if the host's address has changed since the
-certificate was generated, delete `tls-cert.pem` and
-`tls-key.pem` and restart to regenerate it with the current
-addresses. Session cookies are `Secure`, which HTTPS satisfies on
-any address, so logins hold on LAN addresses too.
+### Who may reach the panel: access.toml
+
+The panel always answers on loopback. Which *other* machines may
+reach it is controlled by `<root>/access.toml` — created on first
+start with mode 600, owned by the manager user, editable only from
+a terminal (there is deliberately no web-UI path), applied at
+restart. A malformed file makes startup fail rather than fall back
+to anything more open. `botmgr --root /srv/botenclave access`
+prints the effective policy.
+
+By default the list is empty and the panel does not listen on
+network interfaces at all. To let your own PC in — the usual setup
+for a headless server — add its address:
+
+```toml
+allow = ["192.168.0.10"]
+```
+
+then `sudo systemctl restart botenclave` and open
+`https://<server-address>:8000/`. Once the list admits anything
+beyond loopback, the panel listens on all interfaces and enforces
+the list itself: unlisted clients receive 403 before any login
+logic runs. Entries may be single IP addresses, CIDR ranges
+(`192.168.0.0/24`), or MAC addresses (`aa:bb:cc:dd:ee:ff`). A MAC
+entry is matched through the kernel ARP table, so it only applies
+to IPv4 clients on the same subnet, and a MAC is trivially
+spoofable on a LAN — treat it as a convenience identifier for a
+home network, never as authentication.
+
+`allow_all = true` disables the restriction entirely: any machine
+that can route to this host — including, behind a router port
+mapping, the whole internet — can open the login page, and HTTPS,
+the password and TOTP are the only protection. Prefer listing
+addresses.
+
+Two interactions to know: enforcement uses the client address as
+the manager sees it, so behind a reverse proxy every visitor
+appears as the proxy itself (`X-Forwarded-For` is not trusted);
+and if the host's address has changed since the certificate was
+generated, delete `tls-cert.pem` and `tls-key.pem` and restart to
+regenerate it with the current addresses. Session cookies are
+`Secure`, which HTTPS satisfies on any address, so logins hold on
+LAN addresses too.
 
 `--no-cookie-secure` disables the `Secure` flag for local development
 only. Do not use it on a reachable host.

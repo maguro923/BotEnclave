@@ -244,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--bot-runtime", choices=("helper", "systemd"), default="helper"
     )
+    sub.add_parser("access")
     p = sub.add_parser("unlock")
     p.add_argument("email")
     p = sub.add_parser("setup-token")
@@ -316,9 +317,28 @@ def main(argv: list[str] | None = None) -> int:
         dropped = log.purge(time.time() - args.days * 86400)
         print(f"purged {dropped} entries older than {args.days} days")
         return 0
+    if args.command == "access":
+        from botmgr.access import (
+            ACCESS_FILENAME,
+            AccessConfigError,
+            load_access_config,
+        )
+
+        try:
+            access = load_access_config(args.root)
+        except AccessConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"file: {args.root / ACCESS_FILENAME}")
+        print(f"policy: {access.describe()}")
+        print(f"network listening: {'yes' if access.opens_network() else 'no'}")
+        return 0
     if args.command == "serve":
+        import ipaddress
+
         import uvicorn
 
+        from botmgr.access import AccessConfigError, load_access_config
         from botmgr.app import AppConfig, create_app
         from botmgr.tls import cert_fingerprint, ensure_tls_material
 
@@ -328,6 +348,12 @@ def main(argv: list[str] | None = None) -> int:
                 " expose this instance directly (PLAN 3.2)",
                 file=sys.stderr,
             )
+        try:
+            access = load_access_config(args.root)
+        except AccessConfigError as exc:
+            # Fail closed: a malformed access.toml never widens access.
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         # HTTPS only: a self-signed certificate is generated on first
         # start. There is no HTTP listener — plain HTTP to the port is
         # refused by the TLS handshake, not redirected.
@@ -335,6 +361,21 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"tls: serving HTTPS with {cert_path} "
             f"(SHA-256 {cert_fingerprint(cert_path)})",
+            file=sys.stderr,
+        )
+        # The allowlist decides the bind: loopback-only policy keeps a
+        # loopback bind; anything beyond loopback widens the bind to
+        # all interfaces (the middleware enforces the list itself, so
+        # a manually widened --host stays restricted too).
+        host = args.host
+        try:
+            loopback_bind = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback_bind = host in ("localhost",)
+        if access.opens_network() and loopback_bind:
+            host = "0.0.0.0"
+        print(
+            f"access: {access.describe()} (listening on {host}:{args.port})",
             file=sys.stderr,
         )
         app = create_app(
@@ -345,11 +386,12 @@ def main(argv: list[str] | None = None) -> int:
                 transport=args.transport,
                 package_dir=args.package_dir,
                 bot_runtime=args.bot_runtime,
+                access=access,
             )
         )
         uvicorn.run(
             app,
-            host=args.host,
+            host=host,
             port=args.port,
             ssl_certfile=str(cert_path),
             ssl_keyfile=str(key_path),

@@ -86,8 +86,10 @@ say ""
 say "BotEnclave is running."
 say "Open https://127.0.0.1:8000/ on this host to finish the first-run setup."
 say "The panel serves HTTPS with a self-signed certificate, so the browser"
-say "warns on the first visit. From another machine, tunnel in instead:"
+say "warns on the first visit. From another machine, tunnel in:"
 say "  ssh -L 8000:127.0.0.1:8000 <user>@<this-host>"
+say "or whitelist that machine in $ROOT/access.toml and restart"
+say "(docs/setup.md, section 6)."
 if [ -f "$ROOT/setup-token" ]; then
     say "Setup token: $(cat "$ROOT/setup-token")"
 else

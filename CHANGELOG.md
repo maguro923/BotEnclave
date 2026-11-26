@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added: panel access control via `<root>/access.toml` (mode 600,
+  terminal-edited, applied at restart, fail-closed on malformed
+  input). Loopback is always allowed; the `allow` list admits
+  further clients by IP address, CIDR range or MAC address
+  (same-subnet IPv4 only, matched via the ARP table), and admitting
+  anything beyond loopback widens the bind to all interfaces while
+  the manager enforces the list itself with 403 responses.
+  `allow_all = true` disables the restriction. `botmgr access`
+  prints the effective policy.
 - Added: the panel now serves HTTPS with a self-signed certificate
   generated locally at first start (`tls-cert.pem` / `tls-key.pem`
   in the data root, five-year validity, covering localhost, the
