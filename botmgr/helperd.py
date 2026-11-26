@@ -115,6 +115,7 @@ class Executor(Protocol):
     def console_clear_history(self, bot: str) -> None: ...
     def ensure_layout(self, bot: str) -> None: ...
     def publish_release(self, bot: str, release_id: str) -> None: ...
+    def point_current(self, bot: str, release_id: str) -> None: ...
     def disk_usage(self, bot: str) -> int: ...
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]: ...
     def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]: ...
@@ -234,6 +235,12 @@ class Helper:
             release_id = validate_release_id(request.get("release_id"))
             self.executor.publish_release(bot, release_id)
             return {"published": release_id}
+        if op == "point_current":
+            _reject_unknown_keys(request, {"op", "bot", "release_id"})
+            bot = validate_bot_name(request.get("bot"))
+            release_id = validate_release_id(request.get("release_id"))
+            self.executor.point_current(bot, release_id)
+            return {"current": release_id}
         if op == "disk_usage":
             _reject_unknown_keys(request, {"op", "bot"})
             bot = validate_bot_name(request.get("bot"))
@@ -423,6 +430,24 @@ class SystemExecutor:
                         0o750 if st.st_mode & 0o111 else 0o640,
                         follow_symlinks=False,
                     )
+
+    def point_current(self, bot: str, release_id: str) -> None:
+        """Switch the bot's ``current`` symlink to a release.
+
+        The bot folder belongs to the bot user and the manager has
+        traverse-only access to it, so the manager cannot create the
+        symlink itself (EACCES); the swap is done here, atomically
+        (temporary link + rename), like every other write into
+        bot-owned territory.
+        """
+        validate_release_id(release_id)
+        bot_dir = self.root / "bots" / bot
+        release_dir = bot_dir / "releases" / release_id
+        if release_dir.is_symlink() or not release_dir.is_dir():
+            raise RuntimeError(f"release tree missing: {release_dir}")
+        tmp_link = bot_dir / f".current.tmp-{os.urandom(3).hex()}"
+        os.symlink(f"releases/{release_id}", tmp_link)
+        os.replace(tmp_link, bot_dir / "current")
 
     def delete_user(self, bot: str) -> None:
         user = username_for(bot)
@@ -693,7 +718,21 @@ class SystemExecutor:
     def console_snapshot(self, bot: str) -> str:
         proc = self._tmux(bot, "capture-pane", "-p", "-t", "main")
         if proc.returncode != 0:
-            raise RuntimeError(f"capture-pane failed: {proc.stderr.strip()}")
+            # A bot that is not running has no tmux server to capture:
+            # that is an empty pane, not an error (the panel falls
+            # back to the captured log file for stopped bots).
+            stderr = proc.stderr.strip()
+            if any(
+                marker in stderr
+                for marker in (
+                    "error connecting to",
+                    "no server running",
+                    "can't find session",
+                    "no sessions",
+                )
+            ):
+                return ""
+            raise RuntimeError(f"capture-pane failed: {stderr}")
         return proc.stdout
 
     def console_send(self, bot: str, text: str, enter: bool) -> None:

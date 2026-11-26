@@ -62,6 +62,9 @@ class FakeExecutor:
     def publish_release(self, bot: str, release_id: str) -> None:
         self.calls.append(("publish_release", (bot, release_id)))
 
+    def point_current(self, bot: str, release_id: str) -> None:
+        self.calls.append(("point_current", (bot, release_id)))
+
     def disk_usage(self, bot: str) -> int:
         self.calls.append(("disk_usage", (bot,)))
         return 12345
@@ -413,3 +416,71 @@ def test_validate_release_id() -> None:
     for bad in ("../etc", "20261127T010203", "x", "", None, 42):
         with pytest.raises(RequestError):
             validate_release_id(bad)
+
+
+def test_point_current_dispatch(
+    helper: tuple[Helper, FakeExecutor],
+) -> None:
+    h, ex = helper
+    resp = h.handle(
+        {"op": "point_current", "bot": "alpha", "release_id": "20261127T010203-ab12"}
+    )
+    assert resp["ok"] is True, resp
+    assert ("point_current", ("alpha", "20261127T010203-ab12")) in ex.calls
+    bad = h.handle(
+        {"op": "point_current", "bot": "alpha", "release_id": "../escape"}
+    )
+    assert bad["ok"] is False
+
+
+def test_system_executor_point_current(tmp_path: Path) -> None:
+    import os
+
+    from botmgr.helperd import SystemExecutor
+
+    release_id = "20261127T010203-ab12"
+    bot_dir = tmp_path / "bots" / "alpha"
+    (bot_dir / "releases" / release_id).mkdir(parents=True)
+    executor = SystemExecutor(tmp_path)
+    executor.point_current("alpha", release_id)
+    current = bot_dir / "current"
+    assert current.is_symlink()
+    assert os.readlink(current) == f"releases/{release_id}"
+    # A second switch replaces the link atomically.
+    other = "20261127T020304-cd34"
+    (bot_dir / "releases" / other).mkdir(parents=True)
+    executor.point_current("alpha", other)
+    assert os.readlink(current) == f"releases/{other}"
+    with pytest.raises(RuntimeError):
+        executor.point_current("alpha", "20261127T030405-ee56")
+
+
+
+def test_console_snapshot_empty_when_no_tmux_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from botmgr.helperd import SystemExecutor
+
+    executor = SystemExecutor(tmp_path)
+
+    def fake_tmux_no_server(bot: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="error connecting to /tmp/tmux-995/be-alpha (No such file or directory)",
+        )
+
+    monkeypatch.setattr(executor, "_tmux", fake_tmux_no_server)
+    assert executor.console_snapshot("alpha") == ""
+
+    def fake_tmux_broken(bot: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="some other tmux failure"
+        )
+
+    monkeypatch.setattr(executor, "_tmux", fake_tmux_broken)
+    with pytest.raises(RuntimeError):
+        executor.console_snapshot("alpha")

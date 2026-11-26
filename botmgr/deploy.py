@@ -428,9 +428,9 @@ class DeployService:
         """Switch ``current``, the store's active record and the
         supervisor's launch config to a release (bot already stopped)."""
         bot_dir = self._bot_dir(bot)
-        tmp_link = bot_dir / f".current.tmp-{os.urandom(3).hex()}"
-        os.symlink(f"releases/{release_id}", tmp_link)
-        os.replace(tmp_link, bot_dir / "current")
+        # The bot folder is bot-owned and the manager may only
+        # traverse it, so the symlink swap goes through the helper.
+        self._client.point_current(bot, release_id)
         self._store.set_active_release(bot, release_id)
         data_dir = bot_dir / "data"
         config = LaunchConfig(

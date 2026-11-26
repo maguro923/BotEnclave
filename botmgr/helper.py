@@ -136,6 +136,11 @@ class HelperClient:
             {"op": "publish_release", "bot": bot, "release_id": release_id}
         )
 
+    def point_current(self, bot: str, release_id: str) -> None:
+        self._call(
+            {"op": "point_current", "bot": bot, "release_id": release_id}
+        )
+
     def disk_usage(self, bot: str) -> int:
         result = self._call({"op": "disk_usage", "bot": bot})
         return int(result["bytes"])

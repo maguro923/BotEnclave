@@ -55,6 +55,14 @@ class FakeTransport:
         if op == "publish_release":
             self.published.append((str(bot), str(request["release_id"])))
             return {"ok": True, "result": {"published": request["release_id"]}}
+        if op == "point_current":
+            import os
+
+            bot_dir = self.root / "bots" / str(bot)
+            tmp_link = bot_dir / ".current.tmp-test"
+            os.symlink(f"releases/{request['release_id']}", tmp_link)
+            os.replace(tmp_link, bot_dir / "current")
+            return {"ok": True, "result": {"current": request["release_id"]}}
         if op == "start_bot":
             self._pid += 1
             return {

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fixed: deploy activation failed with `Permission denied`
+  (Errno 13) after a successful build. Switching the `current`
+  symlink happens inside the bot-owned folder, which the manager
+  may only traverse; the swap now goes through the privileged
+  helper (`point_current`), atomically as before.
+- Fixed: opening the console of a bot that is not running raised
+  an exception (tmux has no server to capture) and logged a
+  traceback. A missing tmux server now reads as an empty pane.
 - Fixed: Git/ZIP deploys failed with `PermissionError: [Errno 1]`
   when the panel ran with per-bot OS users. The deploy worker
   (running as the manager user) tried to hand the built release to
