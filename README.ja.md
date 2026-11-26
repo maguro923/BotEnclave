@@ -113,6 +113,8 @@ dotenv 互換モードもあります。平文がディスクに残るため既�
 
 ## ドキュメント
 
+- [docs/setup.md](docs/setup.md) — 前提条件から最初の Bot 起動までの
+  セットアップ手順
 - [docs/architecture.md](docs/architecture.md) — 設計原則、プロセス
   モデル、セキュリティ設計のまとめ
 - [docs/systemd.md](docs/systemd.md) — systemd による本番導入

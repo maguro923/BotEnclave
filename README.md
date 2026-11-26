@@ -117,6 +117,8 @@ disk.
 
 ## Documentation
 
+- [docs/setup.md](docs/setup.md) — step-by-step setup guide, from
+  host prerequisites to the first running bot
 - [docs/architecture.md](docs/architecture.md) — design principles,
   process model, and the security design in one place
 - [docs/systemd.md](docs/systemd.md) — production install with systemd
