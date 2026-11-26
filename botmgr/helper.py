@@ -131,6 +131,11 @@ class HelperClient:
     def ensure_layout(self, bot: str) -> None:
         self._call({"op": "ensure_layout", "bot": bot})
 
+    def publish_release(self, bot: str, release_id: str) -> None:
+        self._call(
+            {"op": "publish_release", "bot": bot, "release_id": release_id}
+        )
+
     def disk_usage(self, bot: str) -> int:
         result = self._call({"op": "disk_usage", "bot": bot})
         return int(result["bytes"])

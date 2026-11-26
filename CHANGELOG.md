@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Fixed: Git/ZIP deploys failed with `PermissionError: [Errno 1]`
+  when the panel ran with per-bot OS users. The deploy worker
+  (running as the manager user) tried to hand the built release to
+  the bot's group itself, but a non-owner `chown` is not permitted
+  and the manager is not a member of the bot's group. Publishing a
+  release now goes through the privileged helper like every other
+  root operation; the worker only builds.
+- Fixed: the live console could not connect on fresh installs
+  (`No supported WebSocket library detected`, console requests
+  answered 404). The `websockets` package is now a dependency.
+- Changed: the manager's operational logging is unified on Python
+  logging to standard error — under systemd, the journal
+  (`journalctl -u botenclave`) — covering the server's own messages
+  and uvicorn's in one format. The audit trail (`audit.log`) and
+  per-bot logs are unchanged.
+
 - Changed: the self-signed TLS certificate is now short-lived —
   31-day validity, renewed roughly monthly. When 7 days or less
   remain (checked at startup and daily while running) a fresh key

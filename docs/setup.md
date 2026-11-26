@@ -257,6 +257,23 @@ LAN addresses too.
 `--no-cookie-secure` disables the `Secure` flag for local development
 only. Do not use it on a reachable host.
 
+### Logs
+
+The manager's operational log — startup, access lines, warnings and
+errors, all in one format — goes to standard error, which under
+systemd is the journal:
+
+```bash
+journalctl -u botenclave -f
+```
+
+That is the conventional destination for a systemd service and is
+readable only by root and the journal group. Two records are
+deliberately separate from it: security-relevant operations are in
+the hash-chained audit trail at `<data root>/audit.log` (also
+mirrored to the journal), and each bot's own output is under
+`bots/<bot>/logs/`.
+
 ## 7. Post-setup checklist
 
 - [ ] Administrator has TOTP enabled and backup codes stored.

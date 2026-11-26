@@ -20,6 +20,7 @@ import pwd
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,15 @@ def username_for(bot: str) -> str:
 
 def socket_name_for(bot: str) -> str:
     return TMUX_SOCKET_PREFIX + bot
+
+
+_RELEASE_ID_PATTERN = re.compile(r"^\d{8}T\d{6}-[0-9a-f]+$")
+
+
+def validate_release_id(value: object) -> str:
+    if not isinstance(value, str) or not _RELEASE_ID_PATTERN.match(value):
+        raise RequestError("bad_request", f"invalid release id: {value!r}")
+    return value
 
 
 def validate_bot_name(value: object) -> str:
@@ -104,6 +114,7 @@ class Executor(Protocol):
     def console_resize(self, bot: str, cols: int, rows: int) -> None: ...
     def console_clear_history(self, bot: str) -> None: ...
     def ensure_layout(self, bot: str) -> None: ...
+    def publish_release(self, bot: str, release_id: str) -> None: ...
     def disk_usage(self, bot: str) -> int: ...
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]: ...
     def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]: ...
@@ -217,6 +228,12 @@ class Helper:
             bot = validate_bot_name(request.get("bot"))
             self.executor.ensure_layout(bot)
             return {"ready": True}
+        if op == "publish_release":
+            _reject_unknown_keys(request, {"op", "bot", "release_id"})
+            bot = validate_bot_name(request.get("bot"))
+            release_id = validate_release_id(request.get("release_id"))
+            self.executor.publish_release(bot, release_id)
+            return {"published": release_id}
         if op == "disk_usage":
             _reject_unknown_keys(request, {"op", "bot"})
             bot = validate_bot_name(request.get("bot"))
@@ -369,6 +386,43 @@ class SystemExecutor:
             path.mkdir(parents=True, exist_ok=True)
             _run(["chown", f"{manager_uid}:{user}", str(path)])
             path.chmod(0o750)
+
+    def publish_release(self, bot: str, release_id: str) -> None:
+        """Hand a built release to the bot's group (PLAN 2.4).
+
+        The deploy worker runs as the manager user and builds the
+        release as manager-owned files; only root may change their
+        group to the bot's group (the manager is not a member of it,
+        and a non-owner chown is EPERM), so publishing lives here.
+        Directories become 0750, files 0750 when executable else
+        0640; symlinks are never followed or modified, so a release
+        cannot redirect the chown/chmod outside its own tree.
+        """
+        validate_release_id(release_id)
+        try:
+            gid = pwd.getpwnam(username_for(bot)).pw_gid
+        except KeyError:
+            raise RuntimeError(f"no OS user for bot {bot!r}") from None
+        bot_dir = self.root / "bots" / bot
+        for sub in ("releases", "venvs"):
+            base = bot_dir / sub / release_id
+            if base.is_symlink() or not base.is_dir():
+                raise RuntimeError(f"release tree missing: {base}")
+            for dirpath, _dirnames, filenames in os.walk(base):
+                dir_path = Path(dirpath)
+                os.chown(dir_path, -1, gid, follow_symlinks=False)
+                os.chmod(dir_path, 0o750, follow_symlinks=False)
+                for name in filenames:
+                    file_path = dir_path / name
+                    st = os.lstat(file_path)
+                    if stat.S_ISLNK(st.st_mode):
+                        continue
+                    os.chown(file_path, -1, gid, follow_symlinks=False)
+                    os.chmod(
+                        file_path,
+                        0o750 if st.st_mode & 0o111 else 0o640,
+                        follow_symlinks=False,
+                    )
 
     def delete_user(self, bot: str) -> None:
         user = username_for(bot)

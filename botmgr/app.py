@@ -18,6 +18,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets as stdlib_secrets
 import signal
@@ -43,6 +44,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
+
+logger = logging.getLogger(__name__)
 
 from botmgr.access import AccessConfig, AccessMiddleware
 from botmgr.audit import AuditLog, AuditMirror
@@ -265,10 +268,9 @@ def create_app(config: AppConfig) -> FastAPI:
                     stdlib_secrets.token_urlsafe(24), encoding="ascii"
                 )
                 token_path.chmod(0o600)
-            print(
-                "[botenclave] first-run setup: open /setup and use the token "
-                f"stored in {token_path}",
-                flush=True,
+            logger.info(
+                "first-run setup: open /setup and use the token stored in %s",
+                token_path,
             )
         task = asyncio.create_task(_watchdog_loop(watchdog, audit))
         tls_task = asyncio.create_task(_tls_rotation_loop(root, audit))
@@ -1210,10 +1212,7 @@ async def _tls_rotation_loop(root: Path, audit: AuditLog) -> None:
             continue
         audit.record("system", "tls.rotated", "", "certificate renewed")
         if os.environ.get("INVOCATION_ID"):
-            print(
-                "[botenclave] tls: restarting to apply the renewed certificate",
-                flush=True,
-            )
+            logger.info("tls: restarting to apply the renewed certificate")
             os.kill(os.getpid(), signal.SIGTERM)
             return
 

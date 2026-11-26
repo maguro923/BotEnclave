@@ -59,6 +59,9 @@ class FakeExecutor:
     def ensure_layout(self, bot: str) -> None:
         self.calls.append(("ensure_layout", (bot,)))
 
+    def publish_release(self, bot: str, release_id: str) -> None:
+        self.calls.append(("publish_release", (bot, release_id)))
+
     def disk_usage(self, bot: str) -> int:
         self.calls.append(("disk_usage", (bot,)))
         return 12345
@@ -386,3 +389,27 @@ def test_system_executor_delete_bot_files_refuses_symlink(tmp_path: Path) -> Non
     with pytest.raises(RuntimeError):
         executor.delete_bot_files("alpha")
     assert (outside / "keep.txt").exists()
+
+
+def test_publish_release_dispatch(
+    helper: tuple[Helper, FakeExecutor],
+) -> None:
+    h, ex = helper
+    resp = h.handle(
+        {"op": "publish_release", "bot": "alpha", "release_id": "20261127T010203-ab12"}
+    )
+    assert resp["ok"] is True, resp
+    assert ("publish_release", ("alpha", "20261127T010203-ab12")) in ex.calls
+    bad = h.handle(
+        {"op": "publish_release", "bot": "alpha", "release_id": "../escape"}
+    )
+    assert bad["ok"] is False
+
+
+def test_validate_release_id() -> None:
+    from botmgr.helperd import RequestError, validate_release_id
+
+    assert validate_release_id("20261127T010203-ab12") == "20261127T010203-ab12"
+    for bad in ("../etc", "20261127T010203", "x", "", None, 42):
+        with pytest.raises(RequestError):
+            validate_release_id(bad)

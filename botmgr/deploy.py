@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import pwd
 import re
 import shutil
 import signal
@@ -199,31 +198,6 @@ def _unwrap_single_dir(dest: Path) -> None:
         inner.rmdir()
 
 
-def _publish_permissions(paths: list[Path], bot: str) -> None:
-    """Make a built release readable/executable by the bot's group only
-    (PLAN 2.4: manager-owned 0750/0640). A private umask on the manager
-    would otherwise leave the venv unusable by the bot user."""
-    try:
-        gid = pwd.getpwnam(f"bm-{bot}").pw_gid
-    except KeyError:
-        return  # no dedicated OS user (test/dev layouts): nothing to do
-    for base in paths:
-        for dirpath, _dirnames, filenames in os.walk(base):
-            dir_path = Path(dirpath)
-            os.chown(dir_path, -1, gid)
-            dir_path.chmod(0o750)
-            for name in filenames:
-                file_path = dir_path / name
-                if file_path.is_symlink():
-                    # Never chown/chmod through a link: the venv's
-                    # bin/python points at the shared interpreter, and a
-                    # repository may link anywhere on the system.
-                    continue
-                os.chown(file_path, -1, gid)
-                mode = file_path.stat().st_mode
-                file_path.chmod(0o750 if mode & 0o111 else 0o640)
-
-
 def build_release(job: dict[str, object]) -> dict[str, object]:
     root = Path(str(job["root"]))
     bot = str(job["bot"])
@@ -272,7 +246,6 @@ def build_release(job: dict[str, object]) -> dict[str, object]:
             )
         else:
             log.write("no requirements.txt; venv left bare\n")
-        _publish_permissions([release_dir, venv_dir], bot)
     return {"release_id": release_id, "entry": entry}
 
 
@@ -435,6 +408,16 @@ class DeployService:
             shutil.rmtree(bot_dir / "releases" / release_id, ignore_errors=True)
             shutil.rmtree(bot_dir / "venvs" / release_id, ignore_errors=True)
             raise DeployError(f"deploy failed: {error}")
+        try:
+            # The worker builds as the manager; handing the trees to
+            # the bot's group needs root (a non-owner chown is EPERM),
+            # so publishing goes through the helper like every other
+            # privileged operation.
+            self._client.publish_release(bot, release_id)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a deploy failure
+            shutil.rmtree(bot_dir / "releases" / release_id, ignore_errors=True)
+            shutil.rmtree(bot_dir / "venvs" / release_id, ignore_errors=True)
+            raise DeployError(f"deploy failed: publish: {exc}") from None
         entry = str(result["entry"])
         self._store.record_release(bot, release_id, source_ref)
         state = self._activate(bot, release_id, entry, restart)

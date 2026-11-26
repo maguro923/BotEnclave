@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import logging
 import os
 import socket
 from pathlib import Path
@@ -261,8 +262,11 @@ def _pair_matches(cert_path: Path, key_path: Path) -> bool:
     ).public_bytes(der, spki)
 
 
+logger = logging.getLogger(__name__)
+
+
 def _log(message: str) -> None:
-    print(f"[botenclave] tls: {message}", flush=True)
+    logger.info("%s", message)
 
 
 def ensure_tls_material(root: Path) -> tuple[Path, Path]:
@@ -304,7 +308,7 @@ def ensure_tls_material(root: Path) -> tuple[Path, Path]:
         try:
             _generate_pair(cert_path, key_path)
         except Exception as exc:  # noqa: BLE001 - keep serving on the old pair
-            _log(f"certificate renewal failed ({exc}); keeping the old pair")
+            logger.warning("certificate renewal failed (%s); keeping the old pair", exc)
         else:
             _log(
                 "certificate renewed with a fresh key pair "
@@ -329,7 +333,7 @@ def rotate_tls_material(root: Path) -> bool:
     try:
         _generate_pair(cert_path, key_path)
     except Exception as exc:  # noqa: BLE001 - retried at the next check
-        _log(f"certificate renewal failed ({exc}); keeping the old pair")
+        logger.warning("certificate renewal failed (%s); keeping the old pair", exc)
         return False
     _log(
         "certificate renewed with a fresh key pair "

@@ -41,6 +41,7 @@ class FakeTransport:
     def __init__(self, root: Path) -> None:
         self.root = root
         self._pid = 20000
+        self.published: list[tuple[str, str]] = []
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request["op"]
@@ -51,6 +52,9 @@ class FakeTransport:
                     parents=True, exist_ok=True
                 )
             return {"ok": True, "result": {"ready": True}}
+        if op == "publish_release":
+            self.published.append((str(bot), str(request["release_id"])))
+            return {"ok": True, "result": {"published": request["release_id"]}}
         if op == "start_bot":
             self._pid += 1
             return {
@@ -225,64 +229,75 @@ def test_git_deploy_via_daemon(
     assert deployed.read_text(encoding="utf-8") == BOT_PY
 
 
-def test_publish_permissions_group_access(tmp_path: Path) -> None:
+def _patch_helperd_gid(monkeypatch: pytest.MonkeyPatch) -> None:
     import os
-    import pwd
     from types import SimpleNamespace
 
-    from botmgr.deploy import _publish_permissions
+    import botmgr.helperd as helperd_mod
 
-    base = tmp_path / "release"
-    (base / "bin").mkdir(parents=True)
-    script = base / "bin" / "python"
+    monkeypatch.setattr(
+        helperd_mod.pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(pw_gid=os.getgid()),
+    )
+
+
+def _release_tree(root: Path, bot: str, release_id: str) -> tuple[Path, Path]:
+    release = root / "bots" / bot / "releases" / release_id
+    venv = root / "bots" / bot / "venvs" / release_id
+    (release / "bin").mkdir(parents=True)
+    (venv / "bin").mkdir(parents=True)
+    return release, venv
+
+
+def test_publish_release_group_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr.helperd import SystemExecutor
+
+    release_id = "20261127T000000-ab12"
+    release, venv = _release_tree(tmp_path, "alpha", release_id)
+    script = release / "bin" / "python"
     script.write_text("#!/bin/sh\n", encoding="utf-8")
     script.chmod(0o700)
-    plain = base / "bot.py"
+    plain = release / "bot.py"
     plain.write_text("x", encoding="utf-8")
     plain.chmod(0o600)
-    real = pwd.getpwnam
-    import botmgr.deploy as deploy_mod
-
-    deploy_mod.pwd = SimpleNamespace(  # type: ignore[attr-defined]
-        getpwnam=lambda name: SimpleNamespace(pw_gid=os.getgid())
-    )
-    try:
-        _publish_permissions([base], "alpha")
-    finally:
-        deploy_mod.pwd = real  # type: ignore[attr-defined]
-    assert base.stat().st_mode & 0o777 == 0o750
+    venv_lib = venv / "lib.py"
+    venv_lib.write_text("x", encoding="utf-8")
+    venv_lib.chmod(0o644)
+    _patch_helperd_gid(monkeypatch)
+    SystemExecutor(tmp_path).publish_release("alpha", release_id)
+    assert release.stat().st_mode & 0o777 == 0o750
     assert script.stat().st_mode & 0o777 == 0o750  # executables stay executable
     assert plain.stat().st_mode & 0o777 == 0o640
+    assert venv_lib.stat().st_mode & 0o777 == 0o640
 
 
-def test_publish_permissions_never_follows_symlinks(tmp_path: Path) -> None:
-    import os
-    import pwd
-    from types import SimpleNamespace
+def test_publish_release_never_follows_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr.helperd import SystemExecutor
 
-    import botmgr.deploy as deploy_mod
-    from botmgr.deploy import _publish_permissions
-
+    release_id = "20261127T000000-ab12"
+    release, _venv = _release_tree(tmp_path, "alpha", release_id)
     outside = tmp_path / "interpreter"
     outside.write_text("#!/bin/sh\n", encoding="utf-8")
     outside.chmod(0o644)
-    base = tmp_path / "release"
-    (base / "bin").mkdir(parents=True)
-    (base / "bin" / "python").symlink_to(outside)  # like a venv's python
-    plain = base / "bot.py"
-    plain.write_text("x", encoding="utf-8")
-    plain.chmod(0o600)
-    real = pwd.getpwnam
-    deploy_mod.pwd = SimpleNamespace(  # type: ignore[attr-defined]
-        getpwnam=lambda name: SimpleNamespace(pw_gid=os.getgid())
-    )
-    try:
-        _publish_permissions([base], "alpha")
-    finally:
-        deploy_mod.pwd = real  # type: ignore[attr-defined]
-    # The link target (shared interpreter) must be untouched.
+    (release / "bin" / "python").symlink_to(outside)  # like a venv's python
+    _patch_helperd_gid(monkeypatch)
+    SystemExecutor(tmp_path).publish_release("alpha", release_id)
     assert outside.stat().st_mode & 0o777 == 0o644
-    assert plain.stat().st_mode & 0o777 == 0o640
+
+
+def test_deploy_publishes_via_helper(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+) -> None:
+    deploy, _store, _supervisor, root = service
+    zip_path = make_zip(root / "pub.zip", {"bot.py": BOT_PY})
+    result = deploy.deploy_zip("alpha", zip_path, "pub.zip")
+    transport = deploy._client._transport  # type: ignore[attr-defined]
+    assert transport.published == [("alpha", result.release_id)]
 
 
 def test_fetch_git_rewrites_credentialed_remote(tmp_path: Path) -> None:

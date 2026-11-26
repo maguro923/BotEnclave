@@ -345,38 +345,41 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "serve":
         import ipaddress
+        import logging
 
         import uvicorn
 
         from botmgr.access import load_access_config_lenient
         from botmgr.app import AppConfig, create_app
+        from botmgr.logsetup import configure_logging, uvicorn_log_config
         from botmgr.tls import cert_fingerprint, ensure_tls_material
 
+        configure_logging()
+        logger = logging.getLogger("botmgr.serve")
         if args.no_cookie_secure:
-            print(
-                "warning: session cookies will not require HTTPS; do not"
-                " expose this instance directly (PLAN 3.2)",
-                file=sys.stderr,
+            logger.warning(
+                "session cookies will not require HTTPS; do not expose"
+                " this instance directly (PLAN 3.2)"
             )
         access, access_error = load_access_config_lenient(args.root)
         if access_error is not None:
             # Never widen, never take the panel down: fall back to
             # loopback-only and say so loudly (PLAN: a single failure
             # must not stop the panel).
-            print(f"error: {access_error}", file=sys.stderr)
-            print(
+            logger.error("%s", access_error)
+            logger.error(
                 "access: falling back to loopback-only until access.toml"
-                f" is fixed (validate with: botmgr --root {args.root} access)",
-                file=sys.stderr,
+                " is fixed (validate with: botmgr --root %s access)",
+                args.root,
             )
         # HTTPS only: a self-signed certificate is generated on first
         # start. There is no HTTP listener — plain HTTP to the port is
         # refused by the TLS handshake, not redirected.
         cert_path, key_path = ensure_tls_material(args.root)
-        print(
-            f"tls: serving HTTPS with {cert_path} "
-            f"(SHA-256 {cert_fingerprint(cert_path)})",
-            file=sys.stderr,
+        logger.info(
+            "tls: serving HTTPS with %s (SHA-256 %s)",
+            cert_path,
+            cert_fingerprint(cert_path),
         )
         # The allowlist decides the bind: loopback-only policy keeps a
         # loopback bind; anything beyond loopback widens the bind to
@@ -389,9 +392,11 @@ def main(argv: list[str] | None = None) -> int:
             loopback_bind = host in ("localhost",)
         if access.opens_network() and loopback_bind:
             host = "0.0.0.0"
-        print(
-            f"access: {access.describe()} (listening on {host}:{args.port})",
-            file=sys.stderr,
+        logger.info(
+            "access: %s (listening on %s:%s)",
+            access.describe(),
+            host,
+            args.port,
         )
         app = create_app(
             AppConfig(
@@ -410,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             ssl_certfile=str(cert_path),
             ssl_keyfile=str(key_path),
+            log_config=uvicorn_log_config(),
         )
         return 0
     if args.command == "unlock":
