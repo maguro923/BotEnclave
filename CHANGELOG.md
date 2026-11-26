@@ -10,6 +10,14 @@
   restrictive than intended, never more open. `botmgr access`
   remains strict and is the documented way to validate the file
   before restarting.
+- Fixed: re-running the installer silently reused everything. It now
+  lists the existing settings and data found in the data root and
+  states that nothing is overwritten, replaces a still-unused setup
+  token with a fresh one (previously the first token stayed valid
+  until setup completed, across any number of reinstalls), and keeps
+  a manager bind (`--host`/`--port`) previously set with
+  `botmgr systemd install` instead of resetting it to the defaults;
+  the health check and the printed URL now use that port.
 
 - Added: panel access control via `<root>/access.toml` (mode 600,
   terminal-edited, applied at restart, fail-closed on malformed

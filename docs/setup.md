@@ -58,6 +58,15 @@ The script is idempotent (safe to re-run) and performs:
 Paths can be overridden through environment variables:
 `BOTENCLAVE_ROOT`, `BOTENCLAVE_MANAGER_USER`, `BOTENCLAVE_VENV`.
 
+Re-running the installer over an existing installation (the upgrade
+path) never overwrites the data root: when settings or data are found
+there, the installer lists them and keeps them as-is — including a
+manager bind (`--host`/`--port`) previously set with
+`botmgr systemd install`. One deliberate exception: a setup token that
+has not been used yet is replaced with a fresh one, printed at the end
+of the run, so a token from an earlier install does not stay valid
+indefinitely.
+
 Then continue with [first-run setup](#4-first-run-setup).
 
 ## 3. Manual setup

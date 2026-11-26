@@ -55,3 +55,21 @@ def test_helper_entry_exports_manager_group_when_given() -> None:
 def test_helper_entry_omits_manager_group_by_default() -> None:
     entry = systemd_units.render_helper_entry(ROOT, PKG)
     assert "BOTENCLAVE_MANAGER_GROUP" not in entry
+
+
+def test_parse_manager_bind_roundtrip() -> None:
+    unit = systemd_units.render_manager_unit(
+        ROOT, "botenclave", PKG, host="0.0.0.0", port=8443
+    )
+    assert systemd_units.parse_manager_bind(unit) == ("0.0.0.0", 8443)
+
+
+def test_parse_manager_bind_defaults() -> None:
+    unit = systemd_units.render_manager_unit(ROOT, "botenclave", PKG)
+    assert systemd_units.parse_manager_bind(unit) == ("127.0.0.1", 8000)
+
+
+def test_parse_manager_bind_absent() -> None:
+    assert systemd_units.parse_manager_bind("[Unit]\nDescription=x\n") is None
+    bot = systemd_units.render_bot_unit("alpha", ROOT, PKG)
+    assert systemd_units.parse_manager_bind(bot) is None

@@ -17,6 +17,7 @@ Layout produced by an install:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 HELPER_ENTRY_PATH = "/usr/local/lib/botenclave/helper"
@@ -25,6 +26,18 @@ MANAGER_UNIT = "botenclave.service"
 
 def bot_unit_name(bot: str) -> str:
     return f"botenclave-bot-{bot}.service"
+
+
+def parse_manager_bind(unit_text: str) -> tuple[str, int] | None:
+    """The --host/--port a rendered manager unit serves on, if present."""
+    for line in unit_text.splitlines():
+        if not line.startswith("ExecStart=") or " serve " not in line:
+            continue
+        host = re.search(r"--host\s+(\S+)", line)
+        port = re.search(r"--port\s+(\d+)", line)
+        if host is not None and port is not None:
+            return host.group(1), int(port.group(1))
+    return None
 
 
 def render_helper_entry(

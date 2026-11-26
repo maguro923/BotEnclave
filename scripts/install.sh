@@ -53,8 +53,31 @@ fi
 mkdir -p "$ROOT"
 chown "$MANAGER_USER" "$ROOT"
 
+# Existing data is never overwritten; say so when there is any.
+EXISTING=""
+for f in access.toml tls-cert.pem tls-key.pem secret.key web-secret \
+    botmgr.db auth.db setup-token; do
+    [ -e "$ROOT/$f" ] && EXISTING="$EXISTING $f"
+done
+[ -d "$ROOT/bots" ] && EXISTING="$EXISTING bots/"
+if [ -n "$EXISTING" ]; then
+    say "Existing BotEnclave data found in $ROOT:"
+    say " $EXISTING"
+    say "Settings and data are kept as-is; nothing is overwritten."
+fi
+
 # 4. Helper entry point, sudoers rule and the manager unit.
 "$BOTMGR" --root "$ROOT" systemd install --manager-user "$MANAGER_USER"
+PORT=$(sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p' \
+    /etc/systemd/system/botenclave.service | head -n 1)
+[ -n "$PORT" ] || PORT=8000
+
+# A still-unused setup token is replaced with a fresh one on re-install
+# (the manager mints it at startup; the new value is printed below).
+if [ -f "$ROOT/setup-token" ]; then
+    rm -f "$ROOT/setup-token"
+    say "Replaced the setup token with a fresh one (shown below)."
+fi
 
 # 5. Start (or restart, when re-running over a live install).
 systemctl enable botenclave >/dev/null 2>&1 || true
@@ -71,10 +94,11 @@ while [ $i -lt 30 ]; do
 import ssl, sys, urllib.request
 try:
     ctx = ssl.create_default_context(cafile=sys.argv[1])
-    urllib.request.urlopen("https://127.0.0.1:8000/healthz", timeout=2, context=ctx)
+    url = "https://127.0.0.1:" + sys.argv[2] + "/healthz"
+    urllib.request.urlopen(url, timeout=2, context=ctx)
 except Exception:
     sys.exit(1)
-' "$ROOT/tls-cert.pem" 2>/dev/null; then
+' "$ROOT/tls-cert.pem" "$PORT" 2>/dev/null; then
         break
     fi
     i=$((i + 1))
@@ -84,10 +108,10 @@ done
 
 say ""
 say "BotEnclave is running."
-say "Open https://127.0.0.1:8000/ on this host to finish the first-run setup."
+say "Open https://127.0.0.1:$PORT/ on this host to finish the first-run setup."
 say "The panel serves HTTPS with a self-signed certificate, so the browser"
 say "warns on the first visit. From another machine, tunnel in:"
-say "  ssh -L 8000:127.0.0.1:8000 <user>@<this-host>"
+say "  ssh -L $PORT:127.0.0.1:$PORT <user>@<this-host>"
 say "or whitelist that machine in $ROOT/access.toml and restart"
 say "(docs/setup.md, section 6)."
 if [ -f "$ROOT/setup-token" ]; then

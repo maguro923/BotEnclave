@@ -156,13 +156,23 @@ def _systemd_command(args: argparse.Namespace) -> int:
         sudoers.chmod(0o440)
         print(f"wrote {sudoers}")
         unit = Path("/etc/systemd/system") / systemd_units.MANAGER_UNIT
+        host: str | None = args.host
+        port: int | None = args.port
+        if unit.exists() and (host is None or port is None):
+            existing = systemd_units.parse_manager_bind(
+                unit.read_text(encoding="utf-8")
+            )
+            if existing is not None:
+                host = host if host is not None else existing[0]
+                port = port if port is not None else existing[1]
+                print(f"kept existing bind from {unit}: {host}:{port}")
         unit.write_text(
             systemd_units.render_manager_unit(
                 root,
                 args.manager_user,
                 package_dir,
-                host=args.host,
-                port=args.port,
+                host=host if host is not None else "127.0.0.1",
+                port=port if port is not None else 8000,
             ),
             encoding="utf-8",
         )
@@ -266,8 +276,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("bot")
     p = systemd_sub.add_parser("install")
     p.add_argument("--manager-user", default="botenclave")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--host", default=None)
+    p.add_argument("--port", type=int, default=None)
     p = systemd_sub.add_parser("install-bot")
     p.add_argument("bot")
     p.add_argument("--memory-max", default="512M")
