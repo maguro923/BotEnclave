@@ -513,6 +513,7 @@ def main(argv: list[str] | None = None) -> int:
             SecretsService(args.root, runtime.store).delete(args.bot)
             WebhookSecrets(args.root).delete(args.bot)
             runtime.client.delete_bot_files(args.bot)
+            runtime.client.delete_user(args.bot)
             print(f"removed {args.bot}")
         elif args.command == "bot-list":
             supervisor.tick()

@@ -598,15 +598,17 @@ def create_app(config: AppConfig) -> FastAPI:
             if supervisor.state(bot).value not in ("stopped", "attention"):
                 with contextlib.suppress(Exception):
                     supervisor.stop(bot)
+            # System teardown first, registration last: if the file
+            # or user removal fails, the bot stays registered and
+            # visible so the operator can retry, instead of leaving
+            # an orphaned tree that the next bot with the same name
+            # would silently inherit.
+            client.delete_bot_files(bot)
+            client.delete_user(bot)
             supervisor.unregister(bot)
             store.remove_bot(bot)
             secrets_service.delete(bot)
             webhook_secrets.delete(bot)
-            client.delete_user(bot)
-            # Deletion is complete: the whole file tree goes with the
-            # registration, so a reused name can never inherit the
-            # previous bot's files (data and releases included).
-            client.delete_bot_files(bot)
 
         await run_in_threadpool(do_delete)
         audit.record(user.email, "bot.delete", bot)

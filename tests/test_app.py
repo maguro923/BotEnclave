@@ -39,6 +39,7 @@ class FakeHelper:
         self.cleared: list[str] = []
         self.sent: list[tuple[str, str, bool]] = []
         self.launches: dict[str, dict[str, Any]] = {}
+        self.fail_ops: set[str] = set()
         self._pid = 10000
 
     def _bot_root(self, bot: str) -> Path:
@@ -46,6 +47,8 @@ class FakeHelper:
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request["op"]
+        if op in self.fail_ops:
+            raise RuntimeError(f"{op} failed (test)")
         bot = request.get("bot")
         result: dict[str, Any] = {}
         if op == "create_user":
@@ -714,6 +717,27 @@ def test_bot_delete_always_removes_the_whole_tree(
     # reused name can never inherit the previous bot's data.
     assert fake.purged == ["alpha"]
     assert not bot_dir.exists()
+
+
+def test_bot_delete_failure_keeps_the_registration(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    fake.fail_ops.add("delete_user")
+    # The file teardown runs BEFORE the failing step...
+    with pytest.raises(RuntimeError):
+        admin.delete("/api/bots/alpha")
+    assert fake.purged == ["alpha"]
+    # ...and the registration survives, so the bot stays visible and
+    # the delete can be retried instead of orphaning the name.
+    store = StateStore(root / "botmgr.db")
+    assert store.get_bot("alpha") is not None
+    fake.fail_ops.clear()
+    resp = admin.delete("/api/bots/alpha")
+    assert resp.status_code == 200, resp.text
+    assert store.get_bot("alpha") is None
 
 
 def test_settings_language_roundtrip(env: tuple[TestClient, FakeHelper, Path]) -> None:

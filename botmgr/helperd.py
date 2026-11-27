@@ -12,6 +12,7 @@ Response shape: {"ok": true, "result": {...}} or
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import grp
 import json
@@ -20,6 +21,7 @@ import pwd
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -339,6 +341,48 @@ def _user_exists(user: str) -> bool:
     return _run(["id", "-u", user]).returncode == 0
 
 
+def _user_pids(uid: int) -> list[int]:
+    pids: list[int] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            if os.stat(f"/proc/{entry}").st_uid == uid:
+                pids.append(int(entry))
+    return pids
+
+
+def _kill_user_processes(user: str) -> None:
+    """SIGTERM, then SIGKILL, every process owned by a bot user.
+
+    Deletion must not be held hostage by a process that escaped the
+    supervisor's stop (a double-forked daemon, a lingering tmux
+    server): userdel refuses while the user owns any process.
+    """
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return
+    for pid in _user_pids(uid):
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and _user_pids(uid):
+        time.sleep(0.1)
+    for pid in _user_pids(uid):
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _make_removable(target: Path) -> None:
+    for dirpath, _dirnames, filenames in os.walk(target):
+        with contextlib.suppress(OSError):
+            os.chmod(dirpath, 0o700)
+        for name in filenames:
+            with contextlib.suppress(OSError):
+                os.chmod(Path(dirpath) / name, 0o600)
+
+
 class SystemExecutor:
     """Executes validated requests against the real system.
 
@@ -509,7 +553,11 @@ class SystemExecutor:
     def delete_user(self, bot: str) -> None:
         user = username_for(bot)
         if _user_exists(user):
+            _kill_user_processes(user)
             proc = _run(["userdel", user])
+            if proc.returncode != 0:
+                _kill_user_processes(user)
+                proc = _run(["userdel", user])
             if proc.returncode != 0:
                 raise RuntimeError(f"userdel failed: {proc.stderr.strip()}")
 
@@ -522,7 +570,19 @@ class SystemExecutor:
             # Never follow or remove through a link planted in the tree.
             raise RuntimeError(f"refusing to remove symlinked bot directory: {target}")
         if target.exists():
-            shutil.rmtree(target)
+            # Nothing running as the bot user may survive into the
+            # removal: a live process can recreate files mid-delete,
+            # and userdel refuses while the user owns any process —
+            # either one leaves the tree behind for the next bot that
+            # reuses the name.
+            with contextlib.suppress(Exception):
+                self._tmux(bot, "kill-server")
+            _kill_user_processes(username_for(bot))
+            try:
+                shutil.rmtree(target)
+            except OSError:
+                _make_removable(target)
+                shutil.rmtree(target)
 
     # -- tmux / process control ---------------------------------------------
     def _tmux(self, bot: str, *args: str) -> subprocess.CompletedProcess[str]:

@@ -108,6 +108,17 @@ def _redact_url(url: str) -> str:
     return url
 
 
+def _child_env() -> dict[str, str]:
+    # Children (venv creation, pip) must not inherit the manager's
+    # PYTHONPATH: pip would treat the manager's own packages as
+    # already installed in the bot's venv and skip them, leaving the
+    # venv silently incomplete (see botmgr.packages.pip_env).
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    return env
+
+
 def _run_logged(
     argv: list[str],
     log: TextIO,
@@ -125,6 +136,7 @@ def _run_logged(
             stderr=subprocess.STDOUT,
             timeout=timeout,
             check=False,
+            env=_child_env(),
         )
     except subprocess.TimeoutExpired:
         raise DeployError(f"command timed out after {timeout}s: {argv[0]}") from None

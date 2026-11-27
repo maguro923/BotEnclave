@@ -16,6 +16,7 @@ is rejected, and pip is always invoked without a shell.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -60,6 +61,24 @@ def package_name(spec: str) -> str:
     return match.group("name")
 
 
+def pip_env() -> dict[str, str]:
+    """Environment for pip subprocesses: the manager's own environment
+    minus the interpreter path overrides.
+
+    The manager runs with PYTHONPATH pointing at its own site-packages
+    (that is how the system python finds the botmgr package). A pip
+    child inheriting it would see the MANAGER's packages as installed
+    in the bot's venv: `pip list` would report them, and `pip install`
+    would skip any requirement they happen to satisfy — leaving the
+    bot's venv silently incomplete. The bot's python must resolve
+    packages from its venv alone.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    return env
+
+
 def _run_pip(
     venv_dir: Path, args: list[str], timeout: int = PIP_TIMEOUT_SECONDS
 ) -> tuple[bool, str]:
@@ -73,6 +92,7 @@ def _run_pip(
             text=True,
             timeout=timeout,
             check=False,
+            env=pip_env(),
         )
     except subprocess.TimeoutExpired:
         return False, f"pip timed out after {timeout}s"
@@ -106,6 +126,7 @@ def list_installed(venv_dir: Path) -> list[dict[str, str]]:
             text=True,
             timeout=60,
             check=False,
+            env=pip_env(),
         )
     except subprocess.TimeoutExpired:
         return []

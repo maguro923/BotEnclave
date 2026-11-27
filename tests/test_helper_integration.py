@@ -550,3 +550,28 @@ def test_edit_zone_writes_belong_to_the_manager(
     finally:
         h.handle({"op": "delete_bot_files", "bot": BOT_A})
         h.handle({"op": "delete_user", "bot": BOT_A})
+
+
+def test_delete_removes_tree_and_user_despite_a_live_process(
+    helper: Helper,
+) -> None:
+    """Regression: deleting a bot whose process is still alive (it
+    escaped the supervisor's stop, or the stop never landed) used to
+    fail at userdel — after the registration was already gone — and
+    leave the whole tree for the next bot reusing the name."""
+    h = helper
+    h.handle({"op": "create_user", "bot": BOT_A})
+    identity = start(h, BOT_A, "sleeper.py")
+    pid = int(identity["pid"])
+    assert pid_alive(pid)
+    # No stop: delete with the bot process (and its tmux server) live.
+    resp = h.handle({"op": "delete_bot_files", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    resp = h.handle({"op": "delete_user", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    assert not (h.root / "bots" / BOT_A).exists()
+    assert wait_until(lambda: not pid_alive(pid))
+    gone = subprocess.run(
+        ["id", "-u", "bm-itest1"], capture_output=True, text=True, check=False
+    )
+    assert gone.returncode != 0

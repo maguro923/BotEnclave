@@ -477,3 +477,30 @@ def test_deploy_edit_refuses_a_stale_base(
     # A refused commit keeps the session and its files for a retry.
     assert store.edit_session_base("alpha") == "20260101T000000-dead"
     assert edit_dir.exists()
+
+
+def test_run_logged_children_do_not_inherit_pythonpath(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deploy worker's children (venv creation, pip installs of
+    requirements.txt) must not inherit the manager's PYTHONPATH, or
+    pip skips requirements the manager's own environment satisfies."""
+    import io
+
+    import botmgr.deploy as deploy_mod
+
+    seen: dict[str, object] = {}
+
+    class _Proc:
+        returncode = 0
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Proc:
+        seen.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr(deploy_mod.subprocess, "run", fake_run)
+    monkeypatch.setenv("PYTHONPATH", "/manager/site-packages")
+    deploy_mod._run_logged(["true"], io.StringIO(), timeout=10)
+    env = seen.get("env")
+    assert isinstance(env, dict)
+    assert "PYTHONPATH" not in env

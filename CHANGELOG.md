@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Fixed (critical): pip operations inherited the manager's
+  PYTHONPATH, so pip treated the manager's own packages as installed
+  in a bot's venv. Installing discord.py skipped its idna dependency
+  (the manager's environment satisfies it via httpx), the package
+  list showed packages that were not in the bot's venv at all, and
+  manually "installing" the missing package changed nothing. All pip
+  invocations — panel installs and deploy-time venv/requirements
+  builds — now run with PYTHONPATH/PYTHONHOME removed. Existing bot
+  venvs built while this bug was live may be missing dependencies;
+  redeploy the release (or reinstall the packages) to repair them.
+- Fixed: deleting a bot could leave its whole file tree behind when
+  any bot process was still alive (userdel refuses while the user
+  owns processes, and the registration had already been removed, so
+  the orphaned releases silently resurfaced in the next bot reusing
+  the name). Deletion now terminates the bot user's processes and
+  tmux server first, removes files before the user, and drops the
+  registration only after the system teardown succeeds — a failure
+  leaves the bot visible for a retry instead of orphaning its files.
 - Fixed: non-ASCII text (arrows such as ←, Japanese, …) could reach
   the console log garbled on systems whose locale is not UTF-8: tmux
   is now always started with `-u` (forced UTF-8), the manager and bot

@@ -114,3 +114,37 @@ def test_split_specs(text: str, expected: list[str]) -> None:
     assert packages.split_specs(text) == expected
     for part in expected:
         assert packages.validate_spec(part) == part
+
+
+def test_pip_children_never_inherit_the_manager_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the manager runs with PYTHONPATH=<its own
+    site-packages>. A pip child inheriting it sees the manager's
+    packages as installed in the bot's venv — `pip list` reports them
+    and `pip install` skips requirements they satisfy (discord.py's
+    idna was skipped exactly this way), leaving the venv incomplete.
+    """
+    import subprocess as sp
+
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").touch()
+    seen: list[dict[str, str] | None] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> sp.CompletedProcess[str]:
+        env = kwargs.get("env")
+        seen.append(env if isinstance(env, dict) else None)
+        out = "[]" if "list" in argv else ""
+        return sp.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(packages.subprocess, "run", fake_run)
+    monkeypatch.setenv("PYTHONPATH", "/manager/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/manager")
+    assert packages.install(venv, "requests")[0] is True
+    assert packages.list_installed(venv) == []
+    assert len(seen) == 2
+    for env in seen:
+        assert env is not None
+        assert "PYTHONPATH" not in env
+        assert "PYTHONHOME" not in env
