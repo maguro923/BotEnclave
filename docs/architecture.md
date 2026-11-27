@@ -60,12 +60,22 @@ A per-bot state machine (`stopped → starting → running → stopping`,
 plus `crashed`, `backoff`, `degraded`, `attention`, and
 `secret-pending`) drives supervision:
 
-- A run that survives 60 seconds counts as a success. Crashes back off
-  (5s → 15s → 60s → 300s); five crashes in ten minutes, or eight
-  failures without a success, park the bot in `attention` for a human.
+- Restarting after an unexpected exit is an operator policy per bot:
+  `none` (never), `once` (one retry after 5 seconds — the default), or
+  `three` (retries after 5s, 15s and 60s). When the budget is spent
+  the bot parks in `attention` for a human. A run that survives 60
+  seconds counts as a success and resets the budget.
+- A run that dies within the **startup phase (10 seconds of launch)**
+  is never restarted, whatever the policy: startup failures (import
+  errors, bad configuration) are deterministic, and retrying them
+  would only churn the log. It parks in `attention` immediately.
+- A bot can opt into **autostart** (default off): when the manager
+  itself starts, such bots are started automatically.
 - On manager restart, **reconcile** rebuilds reality from the store
-  plus the helper's live view: running bots are adopted, dead ones are
-  counted as crashed, log capture that fell off is re-attached.
+  plus the helper's live view: running bots are adopted; a bot found
+  dead is counted as a startup-phase failure (its death time is
+  unknown, so there is no blind retry — autostart is the explicit way
+  to bring it back); log capture that fell off is re-attached.
 - `secret-pending` is not a failure: it means the bot's secrets are
   unavailable to this manager process (memory-only backend after a
   restart) and the bot waits for its owner to re-enter them.
@@ -114,8 +124,13 @@ take over a peer admin; admin recovery is the terminal's
 released by an admin or `botmgr unlock`), and TOTP with replay
 protection plus single-use hashed backup codes.
 
-**Secrets.** Per bot, one of three backends (see the README table).
-Invariants: values are injected per bot, only at start, through the
+**Secrets.** Per bot, one of three backends (see the README table);
+the default for new bots is `systemd-creds`. Writing a systemd-creds
+credential is delegated to the privileged helper: encrypting with the
+host key requires interactive authentication from an unprivileged
+caller, which the manager process does not have. (Decryption never
+touches the manager at all — PID 1 does it via
+`LoadCredentialEncrypted`.) Invariants: values are injected per bot, only at start, through the
 one-shot channel; never via `tmux -e` or session environment (those
 leak through `/proc` and `show-environment`); never into the bot
 registry database, the audit log, or deploy logs (credential-bearing

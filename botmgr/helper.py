@@ -56,6 +56,9 @@ class HelperClient:
     def delete_bot_files(self, bot: str) -> None:
         self._call({"op": "delete_bot_files", "bot": bot})
 
+    def store_credential(self, bot: str, text: str) -> None:
+        self._call({"op": "store_credential", "bot": bot, "text": text})
+
     def start_bot(self, bot: str, config: LaunchConfig) -> ProcessIdentity:
         launch: dict[str, Any] = {
             "command": list(config.command),

@@ -163,3 +163,38 @@ def test_missing_fernet_artifact_with_recorded_keys_is_pending(
     # as secret-pending, never start with an empty environment.
     assert service.resolve("alpha").env is None
     assert service.pending("alpha") is True
+
+
+def test_new_bots_default_to_systemd_creds(tmp_path: Path, store: StateStore) -> None:
+    service = SecretsService(tmp_path, store)
+    stored = store.get_bot("alpha")
+    assert stored is not None
+    assert stored.secret_backend == "systemd-creds"
+    assert service.backend("alpha") == "systemd-creds"
+
+
+def test_credential_write_goes_through_the_helper_client(
+    tmp_path: Path, store: StateStore
+) -> None:
+    """Encrypting with the host key needs privileges the manager does
+    not have (systemd demands interactive authentication from
+    unprivileged callers), so with a helper client wired in, the
+    encryption is delegated instead of attempted locally."""
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def store_credential(self, bot: str, text: str) -> None:
+            self.calls.append((bot, text))
+
+    client = RecordingClient()
+    service = SecretsService(tmp_path, store, client=client)  # type: ignore[arg-type]
+    service.set_env("alpha", ENV, "systemd-creds")
+    assert len(client.calls) == 1
+    bot, text = client.calls[0]
+    assert bot == "alpha"
+    assert "DISCORD_TOKEN=tok-123" in text
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.secret_backend == "systemd-creds"
+    assert service.keys("alpha") == ["DISCORD_TOKEN", "OTHER"]

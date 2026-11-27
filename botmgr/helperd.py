@@ -104,6 +104,7 @@ class Executor(Protocol):
     def create_user(self, bot: str) -> None: ...
     def delete_user(self, bot: str) -> None: ...
     def delete_bot_files(self, bot: str) -> None: ...
+    def store_credential(self, bot: str, text: str) -> None: ...
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity: ...
     def stop_bot(self, bot: str, identity: ProcessIdentity, grace: float) -> int: ...
     def bot_status(
@@ -180,6 +181,14 @@ class Helper:
             bot = validate_bot_name(request.get("bot"))
             self.executor.delete_bot_files(bot)
             return {"removed": bot}
+        if op == "store_credential":
+            _reject_unknown_keys(request, {"op", "bot", "text"})
+            bot = validate_bot_name(request.get("bot"))
+            text = request.get("text")
+            if not isinstance(text, str) or len(text) > 65536 or "\x00" in text:
+                raise RequestError("bad_request", "invalid credential text")
+            self.executor.store_credential(bot, text)
+            return {"stored": bot}
         if op == "start_bot":
             _reject_unknown_keys(request, {"op", "bot", "launch"})
             bot = validate_bot_name(request.get("bot"))
@@ -560,6 +569,38 @@ class SystemExecutor:
                 proc = _run(["userdel", user])
             if proc.returncode != 0:
                 raise RuntimeError(f"userdel failed: {proc.stderr.strip()}")
+
+    def store_credential(self, bot: str, text: str) -> None:
+        """Encrypt a bot's .env text with systemd-creds, as root.
+
+        The manager process cannot do this itself: encrypting with the
+        host key demands interactive authentication from an
+        unprivileged caller (io.systemd.InteractiveAuthenticationRequired),
+        so the privileged helper performs it. The credential name must
+        match the one the bot's unit passes to LoadCredentialEncrypted.
+        """
+        binary = shutil.which("systemd-creds")
+        if binary is None:
+            raise RuntimeError("systemd-creds is not available on this host")
+        secrets_dir = self.root / "secrets"
+        secrets_dir.mkdir(parents=True, exist_ok=True)
+        dest = secrets_dir / f"{bot}.cred"
+        fd, tmp_name = tempfile.mkstemp(dir=secrets_dir, prefix=".cred-")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            tmp.chmod(0o600)
+            proc = _run(
+                [binary, "encrypt", f"--name=botmgr-{bot}", str(tmp), str(dest)]
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"systemd-creds encrypt failed: {proc.stderr.strip()}"
+                )
+            dest.chmod(0o600)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def delete_bot_files(self, bot: str) -> None:
         bots_root = (self.root / "bots").resolve()

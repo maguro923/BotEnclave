@@ -4,12 +4,16 @@ Pure logic with an injectable clock: every method takes ``now`` so tests can
 drive time without sleeping. The supervisor (botmgr.supervisor) owns the side
 effects; this module only decides states.
 
-Rules (PLAN section 2.3):
-- A run that survives 60 seconds counts as a successful run.
-- Unexpected exits restart with exponential backoff: 5s, 15s, 60s, 300s cap.
-- Auto-restart stops (ATTENTION) after 5 crashes within 10 minutes, or after
-  8 consecutive failures with no successful run in between.
-- A run that lasts 10 minutes clears the crash window as well.
+Rules (operator restart policy, per bot):
+- ``none``: never auto-restart. ``once`` (default): one retry, 5 seconds
+  after the failure. ``three``: up to three retries, 5s / 15s / 60s apart.
+  When the budget is spent the bot parks in ATTENTION for a human.
+- A run that survives 60 seconds counts as a successful run and resets
+  the retry budget.
+- A run that dies within the startup phase (10 seconds of launch) is a
+  startup failure and is NEVER retried, whatever the policy: import
+  errors, bad configuration and similar deterministic failures would
+  only churn the log. It parks in ATTENTION immediately.
 """
 
 from __future__ import annotations
@@ -34,11 +38,11 @@ class InvalidTransition(Exception):
 
 
 SUCCESS_THRESHOLD_SECONDS = 60.0
-LONG_RUN_RESET_SECONDS = 600.0
-CRASH_WINDOW_SECONDS = 600.0
-CRASH_WINDOW_LIMIT = 5
-FAILURES_WITHOUT_SUCCESS_LIMIT = 8
-BACKOFF_SCHEDULE = (5.0, 15.0, 60.0, 300.0)
+STARTUP_PHASE_SECONDS = 10.0
+RESTART_POLICIES = ("none", "once", "three")
+DEFAULT_RESTART_POLICY = "once"
+_RETRY_BUDGETS = {"none": 0, "once": 1, "three": 3}
+_RETRY_DELAYS = (5.0, 15.0, 60.0)
 
 _STARTABLE = frozenset(
     {
@@ -52,13 +56,14 @@ _STARTABLE = frozenset(
 
 
 class BotStateMachine:
-    def __init__(self) -> None:
+    def __init__(self, restart_policy: str = DEFAULT_RESTART_POLICY) -> None:
         self._state = BotState.STOPPED
         self._started_at: float | None = None
         self._retry_at: float | None = None
-        self._crash_times: list[float] = []
         self._failures_without_success = 0
         self.last_exit_code: int | None = None
+        self._restart_policy = DEFAULT_RESTART_POLICY
+        self.set_restart_policy(restart_policy)
 
     @property
     def state(self) -> BotState:
@@ -68,13 +73,21 @@ class BotStateMachine:
     def retry_at(self) -> float | None:
         return self._retry_at
 
+    @property
+    def restart_policy(self) -> str:
+        return self._restart_policy
+
+    def set_restart_policy(self, policy: str) -> None:
+        if policy not in _RETRY_BUDGETS:
+            raise ValueError(f"unknown restart policy: {policy!r}")
+        self._restart_policy = policy
+
     def start(self, now: float) -> None:
         if self._state not in _STARTABLE:
             raise InvalidTransition(f"cannot start from {self._state.value}")
         if self._state is BotState.ATTENTION:
             # A manual start after ATTENTION is an operator decision; give
             # the bot a clean slate.
-            self._crash_times.clear()
             self._failures_without_success = 0
         self._state = BotState.STARTING
         self._started_at = now
@@ -126,24 +139,21 @@ class BotStateMachine:
         self.last_exit_code = exit_code
         runtime = now - (self._started_at if self._started_at is not None else now)
         self._started_at = None
-        if runtime >= LONG_RUN_RESET_SECONDS:
-            self._crash_times.clear()
+        if runtime >= SUCCESS_THRESHOLD_SECONDS:
             self._failures_without_success = 0
-        elif runtime >= SUCCESS_THRESHOLD_SECONDS:
-            self._failures_without_success = 0
-        self._crash_times = [t for t in self._crash_times if now - t < CRASH_WINDOW_SECONDS]
-        self._crash_times.append(now)
         self._failures_without_success += 1
-        if (
-            len(self._crash_times) >= CRASH_WINDOW_LIMIT
-            or self._failures_without_success >= FAILURES_WITHOUT_SUCCESS_LIMIT
-        ):
+        if runtime < STARTUP_PHASE_SECONDS:
+            # Startup failure: never retried (see module docstring).
+            self._state = BotState.ATTENTION
+            self._retry_at = None
+            return
+        budget = _RETRY_BUDGETS[self._restart_policy]
+        if self._failures_without_success > budget:
             self._state = BotState.ATTENTION
             self._retry_at = None
             return
         self._state = BotState.BACKOFF
-        index = min(self._failures_without_success - 1, len(BACKOFF_SCHEDULE) - 1)
-        self._retry_at = now + BACKOFF_SCHEDULE[index]
+        self._retry_at = now + _RETRY_DELAYS[self._failures_without_success - 1]
 
     def restore_running(self, now: float) -> None:
         """Adopt a bot that was found still running after a manager restart

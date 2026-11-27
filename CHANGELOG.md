@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Added: a per-bot restart policy on the bot page — never restart,
+  retry once after 5 seconds (the default), or retry up to three
+  times (5s / 15s / 60s) — replacing the fixed backoff schedule and
+  the crash-window rules. Independently of the policy, a bot that
+  dies within 10 seconds of starting is never restarted: startup
+  errors are deterministic and retrying them would only churn the
+  log. A run of 60 seconds or more counts as a success and resets
+  the retry budget.
+- Added: per-bot autostart (default off). Bots with autostart enabled
+  are started automatically when BotEnclave itself starts; a bot
+  found dead after manager downtime parks in `attention` unless
+  autostart brings it back.
+- Changed: the default secret backend for new bots is now
+  systemd-creds.
+- Fixed: saving environment variables with the systemd-creds backend
+  failed with `io.systemd.InteractiveAuthenticationRequired` —
+  encrypting with the host key is not available to the unprivileged
+  manager process. The encryption is now performed by the privileged
+  helper.
 - Fixed (critical): pip operations inherited the manager's
   PYTHONPATH, so pip treated the manager's own packages as installed
   in a bot's venv. Installing discord.py skipped its idna dependency

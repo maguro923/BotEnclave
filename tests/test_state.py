@@ -38,78 +38,106 @@ def test_first_crash_goes_to_backoff_with_first_delay() -> None:
     m = BotStateMachine()
     m.start(now=0.0)
     m.mark_running(now=0.1)
-    m.mark_exited(now=5.0, exit_code=1)
+    m.mark_exited(now=30.0, exit_code=1)
     assert m.state is BotState.BACKOFF
-    assert m.retry_at == 10.0
+    assert m.retry_at == 35.0
 
 
-def test_backoff_delays_follow_schedule_and_cap() -> None:
+def test_default_policy_retries_once_then_attention() -> None:
     m = BotStateMachine()
+    assert m.restart_policy == "once"
+    m.start(now=0.0)
+    m.mark_running(now=0.0)
+    m.mark_exited(now=30.0, exit_code=1)
+    assert m.state is BotState.BACKOFF
+    assert m.retry_at == 35.0
+    m.start(now=35.0)
+    m.mark_running(now=35.0)
+    m.mark_exited(now=65.0, exit_code=1)
+    assert m.state is BotState.ATTENTION
+    assert m.retry_at is None
+
+
+def test_policy_none_never_restarts() -> None:
+    m = BotStateMachine(restart_policy="none")
+    m.start(now=0.0)
+    m.mark_running(now=0.0)
+    m.mark_exited(now=30.0, exit_code=1)
+    assert m.state is BotState.ATTENTION
+    assert m.retry_at is None
+
+
+def test_policy_three_uses_the_5_15_60_schedule() -> None:
+    m = BotStateMachine(restart_policy="three")
     now = 0.0
-    for expected_delay in (5.0, 15.0, 60.0, 300.0, 300.0):
+    for expected_delay in (5.0, 15.0, 60.0):
         m.start(now=now)
         m.mark_running(now=now)
-        crash_at = now + 1.0
-        m.mark_exited(now=crash_at, exit_code=1)
+        m.mark_exited(now=now + 30.0, exit_code=1)
         assert m.state is BotState.BACKOFF
-        assert m.retry_at == crash_at + expected_delay
-        # Jump past the crash window so only the schedule is exercised here;
-        # the window rule has its own test below.
-        now = m.retry_at + 601.0
+        assert m.retry_at == now + 30.0 + expected_delay
+        now = m.retry_at
+    m.start(now=now)
+    m.mark_running(now=now)
+    m.mark_exited(now=now + 30.0, exit_code=1)
+    assert m.state is BotState.ATTENTION
 
 
 def test_backoff_expiry_allows_restart_via_tick() -> None:
     m = BotStateMachine()
     m.start(now=0.0)
     m.mark_running(now=0.0)
-    m.mark_exited(now=1.0, exit_code=1)
-    assert m.tick(now=5.9) is False
+    m.mark_exited(now=30.0, exit_code=1)
+    assert m.tick(now=34.9) is False
     assert m.state is BotState.BACKOFF
-    assert m.tick(now=6.0) is True
+    assert m.tick(now=35.0) is True
     assert m.state is BotState.STARTING
 
 
-def test_five_crashes_within_ten_minutes_require_attention() -> None:
-    m = BotStateMachine()
-    now = 0.0
-    for _ in range(4):
-        m.start(now=now)
-        m.mark_running(now=now)
-        m.mark_exited(now=now + 1.0, exit_code=1)
-        assert m.state is BotState.BACKOFF
-        now = m.retry_at
-    m.start(now=now)
-    m.mark_running(now=now)
-    m.mark_exited(now=now + 1.0, exit_code=1)
+@pytest.mark.parametrize("policy", ["none", "once", "three"])
+def test_startup_failure_is_never_retried(policy: str) -> None:
+    # A run that dies within the startup phase (10 seconds) parks in
+    # ATTENTION whatever the policy: startup errors are deterministic
+    # and retrying them would only churn the log.
+    m = BotStateMachine(restart_policy=policy)
+    m.start(now=100.0)
+    m.mark_running(now=100.1)
+    m.mark_exited(now=105.0, exit_code=1)
     assert m.state is BotState.ATTENTION
     assert m.retry_at is None
 
 
-def test_eight_failures_without_success_require_attention() -> None:
+def test_exit_at_the_startup_boundary_is_a_normal_failure() -> None:
     m = BotStateMachine()
-    now = 0.0
-    # Spread crashes more than ten minutes apart so the window rule never
-    # fires; the cumulative-without-success rule must stop the loop instead.
-    for i in range(8):
-        m.start(now=now)
-        m.mark_running(now=now)
-        m.mark_exited(now=now + 1.0, exit_code=1)
-        if i < 7:
-            assert m.state is BotState.BACKOFF
-            now = m.retry_at + 601.0
+    m.start(now=0.0)
+    m.mark_running(now=0.0)
+    m.mark_exited(now=10.0, exit_code=1)
+    assert m.state is BotState.BACKOFF
+
+
+def test_startup_failure_on_a_retry_stops_immediately() -> None:
+    m = BotStateMachine(restart_policy="three")
+    m.start(now=0.0)
+    m.mark_running(now=0.0)
+    m.mark_exited(now=30.0, exit_code=1)
+    assert m.state is BotState.BACKOFF
+    m.start(now=35.0)
+    m.mark_running(now=35.0)
+    m.mark_exited(now=37.0, exit_code=1)
     assert m.state is BotState.ATTENTION
 
 
 def test_run_surviving_sixty_seconds_counts_as_success() -> None:
-    m = BotStateMachine()
+    m = BotStateMachine(restart_policy="three")
     now = 0.0
-    for _ in range(7):
+    for expected_delay in (5.0, 15.0):
         m.start(now=now)
         m.mark_running(now=now)
-        m.mark_exited(now=now + 1.0, exit_code=1)
-        now = m.retry_at + 601.0
-    # A run that survives the 60-second success threshold clears the
-    # cumulative failure counter, so the next crash restarts the schedule.
+        m.mark_exited(now=now + 30.0, exit_code=1)
+        assert m.retry_at == now + 30.0 + expected_delay
+        now = m.retry_at
+    # A run past the 60-second success threshold resets the budget, so
+    # the next failure starts the schedule from the beginning.
     m.start(now=now)
     m.mark_running(now=now)
     m.mark_exited(now=now + 61.0, exit_code=1)
@@ -117,19 +145,12 @@ def test_run_surviving_sixty_seconds_counts_as_success() -> None:
     assert m.retry_at == now + 61.0 + 5.0
 
 
-def test_ten_minute_run_resets_crash_window() -> None:
+def test_set_restart_policy_validates() -> None:
     m = BotStateMachine()
-    now = 0.0
-    for _ in range(4):
-        m.start(now=now)
-        m.mark_running(now=now)
-        m.mark_exited(now=now + 1.0, exit_code=1)
-        now = m.retry_at
-    m.start(now=now)
-    m.mark_running(now=now)
-    m.mark_exited(now=now + 601.0, exit_code=1)
-    assert m.state is BotState.BACKOFF
-    assert m.retry_at == now + 601.0 + 5.0
+    m.set_restart_policy("three")
+    assert m.restart_policy == "three"
+    with pytest.raises(ValueError):
+        m.set_restart_policy("forever")
 
 
 def test_exit_while_stopping_is_not_a_crash() -> None:
@@ -153,16 +174,19 @@ def test_clean_exit_is_treated_as_crash_for_supervision() -> None:
 
 def test_attention_can_be_started_manually() -> None:
     m = BotStateMachine()
-    now = 0.0
-    for _ in range(5):
-        m.start(now=now)
-        m.mark_running(now=now)
-        m.mark_exited(now=now + 1.0, exit_code=1)
-        if m.state is BotState.BACKOFF:
-            now = m.retry_at
+    m.start(now=0.0)
+    m.mark_running(now=0.0)
+    m.mark_exited(now=30.0, exit_code=1)
+    m.start(now=35.0)
+    m.mark_running(now=35.0)
+    m.mark_exited(now=65.0, exit_code=1)
     assert m.state is BotState.ATTENTION
-    m.start(now=now + 1000.0)
+    # A manual start is an operator decision: the retry budget resets.
+    m.start(now=1000.0)
     assert m.state is BotState.STARTING
+    m.mark_running(now=1000.0)
+    m.mark_exited(now=1030.0, exit_code=1)
+    assert m.state is BotState.BACKOFF
 
 
 def test_request_stop_from_stopping_is_a_noop() -> None:

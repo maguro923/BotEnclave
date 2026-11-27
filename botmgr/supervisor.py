@@ -18,7 +18,7 @@ from botmgr.backend import Backend
 from botmgr.envstore import EnvResolution
 from botmgr.launcher import LaunchConfig
 from botmgr.procident import ProcessIdentity
-from botmgr.state import BotState, BotStateMachine
+from botmgr.state import DEFAULT_RESTART_POLICY, BotState, BotStateMachine
 
 if TYPE_CHECKING:
     from botmgr.store import StateStore
@@ -39,9 +39,11 @@ class UnknownBotError(KeyError):
 
 
 class _BotEntry:
-    def __init__(self, config: LaunchConfig) -> None:
+    def __init__(
+        self, config: LaunchConfig, restart_policy: str = DEFAULT_RESTART_POLICY
+    ) -> None:
         self.config = config
-        self.machine = BotStateMachine()
+        self.machine = BotStateMachine(restart_policy)
         self.identity: ProcessIdentity | None = None
         self.lock = threading.Lock()
 
@@ -67,13 +69,23 @@ class Supervisor:
         return self._env_provider(bot_id)
 
     def register(
-        self, bot_id: str, config: LaunchConfig, owner_id: int | None = None
+        self,
+        bot_id: str,
+        config: LaunchConfig,
+        owner_id: int | None = None,
+        restart_policy: str = DEFAULT_RESTART_POLICY,
     ) -> None:
         if bot_id in self._bots:
             raise ValueError(f"bot already registered: {bot_id}")
-        self._bots[bot_id] = _BotEntry(config)
+        self._bots[bot_id] = _BotEntry(config, restart_policy)
         if self._store is not None:
             self._store.register_bot(bot_id, config, owner_id)
+
+    def set_restart_policy(self, bot_id: str, policy: str) -> None:
+        self._entry(bot_id).machine.set_restart_policy(policy)
+
+    def restart_policy(self, bot_id: str) -> str:
+        return self._entry(bot_id).machine.restart_policy
 
     def bot_ids(self) -> list[str]:
         return sorted(self._bots)
@@ -89,10 +101,14 @@ class Supervisor:
             self._store.save_state(bot_id, entry.machine.state, entry.identity)
 
     def restore_running(
-        self, bot_id: str, config: LaunchConfig, identity: ProcessIdentity
+        self,
+        bot_id: str,
+        config: LaunchConfig,
+        identity: ProcessIdentity,
+        restart_policy: str = DEFAULT_RESTART_POLICY,
     ) -> None:
         if bot_id not in self._bots:
-            self.register(bot_id, config)
+            self.register(bot_id, config, restart_policy=restart_policy)
         entry = self._bots[bot_id]
         entry.identity = identity
         adopt = getattr(self._backend, "adopt", None)
@@ -101,11 +117,18 @@ class Supervisor:
         entry.machine.restore_running(self._now())
         self._persist(bot_id, entry)
 
-    def restore_exited(self, bot_id: str, config: LaunchConfig) -> None:
-        """Adopt a bot that died while the manager was down: count it as a
-        crash now so the normal backoff/attention rules apply."""
+    def restore_exited(
+        self,
+        bot_id: str,
+        config: LaunchConfig,
+        restart_policy: str = DEFAULT_RESTART_POLICY,
+    ) -> None:
+        """Adopt a bot that died while the manager was down. Its death
+        time is unknown, so it is counted as a startup-phase failure:
+        no blind retry at boot (autostart, when enabled, is the
+        operator's explicit way to bring it back)."""
         if bot_id not in self._bots:
-            self.register(bot_id, config)
+            self.register(bot_id, config, restart_policy=restart_policy)
         entry = self._bots[bot_id]
         now = self._now()
         entry.machine.start(now)

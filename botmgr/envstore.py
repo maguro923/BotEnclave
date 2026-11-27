@@ -62,9 +62,12 @@ class EnvResolution:
 
 
 class SecretsService:
-    def __init__(self, root: Path, store: StateStore) -> None:
+    def __init__(
+        self, root: Path, store: StateStore, client: object | None = None
+    ) -> None:
         self._root = root
         self._store = store
+        self._client = client
         self._dir = root / "secrets"
         self._dir.mkdir(parents=True, exist_ok=True)
         self._dir.chmod(0o700)
@@ -108,7 +111,7 @@ class SecretsService:
 
     def backend(self, bot: str) -> str:
         stored = self._store.get_bot(bot)
-        return stored.secret_backend if stored else "fernet"
+        return stored.secret_backend if stored else "systemd-creds"
 
     # -- writes ---------------------------------------------------------------
     def set_env(self, bot: str, env: dict[str, str], backend: str) -> None:
@@ -150,6 +153,18 @@ class SecretsService:
         )
 
     def _write_credential(self, bot: str, text: str) -> None:
+        if self._client is not None:
+            # Encryption with the host key requires privileges the
+            # manager does not have (systemd demands interactive
+            # authentication from unprivileged callers); the helper
+            # performs it as root.
+            store_credential = getattr(self._client, "store_credential", None)
+            if store_credential is not None:
+                try:
+                    store_credential(bot, text)
+                except Exception as exc:  # noqa: BLE001 - surface as a secrets error
+                    raise SecretsError(str(exc)) from None
+                return
         binary = shutil.which("systemd-creds")
         if binary is None:
             raise SecretsError("systemd-creds is not available on this host")
@@ -191,7 +206,7 @@ class SecretsService:
     def resolve(self, bot: str) -> EnvResolution:
         stored = self._store.get_bot(bot)
         dotenv = stored.dotenv_mode if stored else False
-        backend = stored.secret_backend if stored else "fernet"
+        backend = stored.secret_backend if stored else "systemd-creds"
         if backend == "systemd-creds":
             if not self._cred_path(bot).exists():
                 if self.keys(bot):

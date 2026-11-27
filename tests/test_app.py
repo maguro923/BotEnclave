@@ -64,6 +64,13 @@ class FakeHelper:
             self.purged.append(bot)
             shutil.rmtree(self._bot_root(bot), ignore_errors=True)
             result = {"removed": bot}
+        elif op == "store_credential":
+            secrets_dir = self.root / "secrets"
+            secrets_dir.mkdir(parents=True, exist_ok=True)
+            (secrets_dir / f"{bot}.cred").write_text(
+                "fake-credential", encoding="utf-8"
+            )
+            result = {"stored": bot}
         elif op == "ensure_layout":
             for sub in ("releases", "venvs"):
                 (self._bot_root(bot) / sub).mkdir(parents=True, exist_ok=True)
@@ -1008,6 +1015,65 @@ def test_packages_install_accepts_a_batch(
     assert "broken-pkg" not in store.list_packages("alpha")
 
 
+def test_restart_policy_and_autostart_endpoints(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+
+    got = admin.get("/api/bots/alpha/restart-policy")
+    assert got.status_code == 200 and got.json() == {"policy": "once"}
+    resp = admin.put("/api/bots/alpha/restart-policy", json={"policy": "three"})
+    assert resp.status_code == 200 and resp.json() == {"policy": "three"}
+    bad = admin.put("/api/bots/alpha/restart-policy", json={"policy": "forever"})
+    assert bad.status_code == 400
+
+    store = StateStore(root / "botmgr.db")
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.restart_policy == "three"
+    supervisor = client.app.state.supervisor  # type: ignore[attr-defined]
+    assert supervisor.restart_policy("alpha") == "three"
+
+    got = admin.get("/api/bots/alpha/autostart")
+    assert got.status_code == 200 and got.json() == {"autostart": False}
+    resp = admin.put("/api/bots/alpha/autostart", json={"autostart": True})
+    assert resp.status_code == 200 and resp.json() == {"autostart": True}
+    bad = admin.put("/api/bots/alpha/autostart", json={"autostart": "yes"})
+    assert bad.status_code == 400
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.autostart is True
+
+
+def test_autostart_starts_the_bot_on_manager_boot(tmp_path: Path) -> None:
+    def build() -> tuple[TestClient, FakeHelper]:
+        fake = FakeHelper(tmp_path)
+        app = create_app(
+            AppConfig(
+                root=tmp_path,
+                secret="test-secret",
+                cookie_secure=False,
+                transport_override=fake,
+            )
+        )
+        return TestClient(app, client=("127.0.0.1", 50000)), fake
+
+    client1, _fake1 = build()
+    with client1:
+        admin = setup_admin(client1, tmp_path)
+        create_bot(admin, "alpha")
+        create_bot(admin, "beta")
+        resp = admin.put("/api/bots/alpha/autostart", json={"autostart": True})
+        assert resp.status_code == 200
+
+    _client2, fake2 = build()
+    with _client2:
+        pass
+    # alpha had autostart on and was started during boot; beta was not.
+    assert "alpha" in fake2.launches
+    assert "beta" not in fake2.launches
+
+
 def test_command_override_endpoints(
     env: tuple[TestClient, FakeHelper, Path],
 ) -> None:
@@ -1132,6 +1198,7 @@ def test_bot_page_wires_command_card_and_status_polling(
     assert "cmd-input" in page and "cmd-save" in page and "cmd-reset" in page
     assert "pollStatus" in page and "meta-disk" in page
     assert "log-clear" in page
+    assert "rp-select" in page and "autostart-toggle" in page
 
 
 def test_bot_page_wires_editor_edit_session_and_packages(

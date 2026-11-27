@@ -71,6 +71,24 @@
   </p>
   <p class="muted">{{ t('bot.cmd_note') }}</p>
 </div>
+<div class="card">
+  <h2>{{ t('bot.behavior_title') }}</h2>
+  <p>
+    <label>{{ t('bot.restart_policy') }}
+      <select id="rp-select">
+        <option value="none">{{ t('bot.restart_none') }}</option>
+        <option value="once">{{ t('bot.restart_once') }}</option>
+        <option value="three">{{ t('bot.restart_three') }}</option>
+      </select>
+    </label>
+    <span id="rp-result"></span>
+  </p>
+  <p class="muted">{{ t('bot.restart_note') }}</p>
+  <p>
+    <label><input type="checkbox" id="autostart-toggle"> {{ t('bot.autostart') }}</label>
+    <span id="autostart-result"></span>
+  </p>
+</div>
 </div>
 
 <div data-panel="console" hidden>
@@ -292,6 +310,33 @@ $('cmd-reset').onclick = async () => {
   else showResult($('cmd-result'), window.t('bot.failed').replace('{detail}', data.detail || resp.status));
 };
 loadCommand();
+
+// -- restart policy + autostart ---------------------------------------------------
+async function loadBehavior() {
+  const rp = await fetch('/api/bots/' + botId + '/restart-policy');
+  if (rp.ok) $('rp-select').value = (await rp.json()).policy;
+  const as = await fetch('/api/bots/' + botId + '/autostart');
+  if (as.ok) $('autostart-toggle').checked = (await as.json()).autostart;
+}
+$('rp-select').onchange = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/restart-policy', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ policy: $('rp-select').value }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  showResult($('rp-result'), resp.ok ? window.t('bot.behavior_saved') : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
+  if (!resp.ok) loadBehavior();
+};
+$('autostart-toggle').onchange = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/autostart', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ autostart: $('autostart-toggle').checked }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  showResult($('autostart-result'), resp.ok ? window.t('bot.behavior_saved') : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
+  if (!resp.ok) loadBehavior();
+};
+loadBehavior();
 
 // -- live status: state, uptime and disk, refreshed every second ----------------
 async function pollStatus() {

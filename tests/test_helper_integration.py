@@ -575,3 +575,37 @@ def test_delete_removes_tree_and_user_despite_a_live_process(
         ["id", "-u", "bm-itest1"], capture_output=True, text=True, check=False
     )
     assert gone.returncode != 0
+
+
+def test_store_credential_encrypts_via_helper(helper: Helper) -> None:
+    """The manager cannot encrypt with the host key itself (systemd
+    requires interactive authentication from unprivileged callers);
+    the helper does it as root, and the result decrypts with the
+    matching credential name."""
+    h = helper
+    h.handle({"op": "create_user", "bot": BOT_A})
+    resp = h.handle(
+        {"op": "store_credential", "bot": BOT_A, "text": "MY_TOKEN=cred-xyz\n"}
+    )
+    if resp["ok"] is not True and "systemd-creds" in str(resp.get("message")):
+        pytest.skip(f"systemd-creds unavailable: {resp.get('message')}")
+    assert resp["ok"] is True, resp
+    cred = h.root / "secrets" / f"{BOT_A}.cred"
+    assert cred.exists()
+    assert cred.stat().st_mode & 0o777 == 0o600
+    out = subprocess.run(
+        [
+            "systemd-creds",
+            "decrypt",
+            f"--name=botmgr-{BOT_A}",
+            str(cred),
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout == "MY_TOKEN=cred-xyz\n"
+    h.handle({"op": "delete_bot_files", "bot": BOT_A})
+    h.handle({"op": "delete_user", "bot": BOT_A})

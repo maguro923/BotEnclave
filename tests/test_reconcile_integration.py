@@ -109,5 +109,7 @@ def test_tmux_kill_is_detected_as_crash(helper: Helper) -> None:
 
     out = run_cli(helper, "bot-status", BOT)
     assert "had exited" in out.stdout
-    assert f"{BOT}: backoff" in out.stdout
-    assert stored_bot(helper).state is BotState.BACKOFF
+    # The sleeper was killed seconds after starting, i.e. inside its
+    # startup phase, so the exit parks it in ATTENTION (no retry).
+    assert f"{BOT}: attention" in out.stdout
+    assert stored_bot(helper).state is BotState.ATTENTION

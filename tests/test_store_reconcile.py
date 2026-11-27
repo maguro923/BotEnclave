@@ -92,13 +92,16 @@ def test_reconcile_adopts_live_bot(tmp_path: Path) -> None:
     store.close()
 
 
-def test_reconcile_counts_dead_bot_as_crashed(tmp_path: Path) -> None:
+def test_reconcile_counts_dead_bot_as_a_startup_failure(tmp_path: Path) -> None:
+    # A bot found dead after manager downtime is not retried blindly:
+    # its death time is unknown, so it parks in ATTENTION (autostart,
+    # when enabled, is the explicit way to bring it back).
     supervisor, store, client = _setup(tmp_path, alive=False)
     report = reconcile(supervisor, store, client, CaptureController(client))
     assert report.found_dead == ["alpha"]
-    assert supervisor.state("alpha") is BotState.BACKOFF
+    assert supervisor.state("alpha") is BotState.ATTENTION
     stored = store.load_all()
-    assert stored[0].state is BotState.BACKOFF
+    assert stored[0].state is BotState.ATTENTION
     store.close()
 
 

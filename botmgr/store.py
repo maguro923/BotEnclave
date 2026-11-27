@@ -65,12 +65,14 @@ CREATE TABLE IF NOT EXISTS bot_packages (
 """
 
 _BOT_COLUMN_MIGRATIONS = {
-    "secret_backend": "TEXT NOT NULL DEFAULT 'fernet'",
+    "secret_backend": "TEXT NOT NULL DEFAULT 'systemd-creds'",
     "source_type": "TEXT",
     "git_url_enc": "TEXT",
     "git_branch": "TEXT",
     "dotenv_mode": "INTEGER NOT NULL DEFAULT 0",
     "command_override": "TEXT",
+    "restart_policy": "TEXT NOT NULL DEFAULT 'once'",
+    "autostart": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
@@ -81,11 +83,13 @@ class StoredBot:
     state: BotState
     identity: ProcessIdentity | None
     owner_id: int | None = None
-    secret_backend: str = "fernet"
+    secret_backend: str = "systemd-creds"
     source_type: str | None = None
     git_branch: str | None = None
     dotenv_mode: bool = False
     command_override: tuple[str, ...] | None = None
+    restart_policy: str = "once"
+    autostart: bool = False
 
 
 @dataclass(frozen=True)
@@ -150,20 +154,24 @@ class StateStore:
             # settings that a REPLACE would silently reset to defaults.
             row = self._conn.execute(
                 "SELECT owner_id, secret_backend, source_type, git_url_enc,"
-                " git_branch, dotenv_mode, command_override"
+                " git_branch, dotenv_mode, command_override, restart_policy,"
+                " autostart"
                 " FROM bots WHERE bot_id = ?",
                 (bot_id,),
             ).fetchone()
             if owner_id is None:
                 owner_id = row[0] if row else None
             preserved = (
-                row[1:] if row else ("fernet", None, None, None, 0, None)
+                row[1:]
+                if row
+                else ("systemd-creds", None, None, None, 0, None, "once", 0)
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at,"
                 " owner_id, secret_backend, source_type, git_url_enc,"
-                " git_branch, dotenv_mode, command_override)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " git_branch, dotenv_mode, command_override, restart_policy,"
+                " autostart)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     bot_id,
                     config_to_json(config),
@@ -203,7 +211,8 @@ class StateStore:
             rows = self._conn.execute(
                 "SELECT b.bot_id, b.launch_json, s.state, s.pid, s.start_time,"
                 " s.boot_id, b.owner_id, b.secret_backend, b.source_type,"
-                " b.git_branch, b.dotenv_mode, b.command_override FROM bots b"
+                " b.git_branch, b.dotenv_mode, b.command_override,"
+                " b.restart_policy, b.autostart FROM bots b"
                 " LEFT JOIN bot_state s ON s.bot_id = b.bot_id ORDER BY b.bot_id"
             ).fetchall()
         result: list[StoredBot] = []
@@ -221,6 +230,8 @@ class StateStore:
                 git_branch,
                 dotenv_mode,
                 command_override_json,
+                restart_policy,
+                autostart,
             ) = row
             identity = None
             if pid is not None and start_time is not None and boot_id is not None:
@@ -234,7 +245,7 @@ class StateStore:
                     state=BotState(state) if state else BotState.STOPPED,
                     identity=identity,
                     owner_id=owner_id,
-                    secret_backend=secret_backend or "fernet",
+                    secret_backend=secret_backend or "systemd-creds",
                     source_type=source_type,
                     git_branch=git_branch,
                     dotenv_mode=bool(dotenv_mode),
@@ -243,6 +254,8 @@ class StateStore:
                         if command_override_json
                         else None
                     ),
+                    restart_policy=restart_policy or "once",
+                    autostart=bool(autostart),
                 )
             )
         return result
@@ -262,6 +275,22 @@ class StateStore:
                     json.dumps(command) if command is not None else None,
                     bot_id,
                 ),
+            )
+            self._conn.commit()
+
+    def set_restart_policy(self, bot_id: str, policy: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET restart_policy = ? WHERE bot_id = ?",
+                (policy, bot_id),
+            )
+            self._conn.commit()
+
+    def set_autostart(self, bot_id: str, enabled: bool) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET autostart = ? WHERE bot_id = ?",
+                (1 if enabled else 0, bot_id),
             )
             self._conn.commit()
 

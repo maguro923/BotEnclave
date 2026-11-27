@@ -42,15 +42,17 @@ def reconcile(
         if stored.state in _RUNNING_STATES and stored.identity is not None:
             alive, _exit = client.bot_status(bot, stored.identity)
             if alive:
-                supervisor.restore_running(bot, stored.config, stored.identity)
+                supervisor.restore_running(
+                    bot, stored.config, stored.identity, stored.restart_policy
+                )
                 report.adopted_running.append(bot)
                 was_on = client.capture_state(bot)
                 capture.ensure_capture(bot)
                 if not was_on:
                     report.capture_reattached.append(bot)
                 continue
-            supervisor.restore_exited(bot, stored.config)
+            supervisor.restore_exited(bot, stored.config, stored.restart_policy)
             report.found_dead.append(bot)
             continue
-        supervisor.register(bot, stored.config)
+        supervisor.register(bot, stored.config, restart_policy=stored.restart_policy)
     return report

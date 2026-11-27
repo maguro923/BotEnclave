@@ -22,6 +22,9 @@ class FakeExecutor:
     def delete_bot_files(self, bot: str) -> None:
         self.calls.append(("delete_bot_files", (bot,)))
 
+    def store_credential(self, bot: str, text: str) -> None:
+        self.calls.append(("store_credential", (bot, text)))
+
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity:
         self.calls.append(("start_bot", (bot, launch)))
         return IDENT
@@ -504,3 +507,12 @@ def test_console_snapshot_empty_when_no_tmux_server(
     monkeypatch.setattr(executor, "_tmux", fake_tmux_broken)
     with pytest.raises(RuntimeError):
         executor.console_snapshot("alpha")
+
+
+def test_store_credential_dispatches(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, fake = helper
+    resp = h.handle({"op": "store_credential", "bot": "alpha", "text": "A=1\n"})
+    assert resp["ok"] is True
+    assert fake.calls == [("store_credential", ("alpha", "A=1\n"))]
+    bad = h.handle({"op": "store_credential", "bot": "alpha", "text": 3})
+    assert bad["ok"] is False

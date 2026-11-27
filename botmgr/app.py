@@ -74,6 +74,7 @@ from botmgr.logtail import LogFollower, read_tail
 from botmgr.masking import mask_lines
 from botmgr.reconcile import reconcile
 from botmgr.secrets import decrypt_text, encrypt_text, load_or_create_fernet
+from botmgr.state import RESTART_POLICIES, BotState
 from botmgr.store import StateStore, StoredBot
 from botmgr.supervisor import BusyError, SecretPendingError, Supervisor
 from botmgr.timeutil import (
@@ -193,7 +194,7 @@ def create_app(config: AppConfig) -> FastAPI:
     else:
         transport = direct_transport(root, config.package_dir)
     client = HelperClient(transport)
-    secrets_service = SecretsService(root, store)
+    secrets_service = SecretsService(root, store, client=client)
     supervisor = Supervisor(
         HelperBackend(client, via_unit=config.bot_runtime == "systemd"),
         store=store,
@@ -299,6 +300,17 @@ def create_app(config: AppConfig) -> FastAPI:
             audit.record("system", "reconcile.adopted", bot)
         for bot in report.found_dead:
             audit.record("system", "reconcile.found_dead", bot)
+        for stored_bot in store.load_all():
+            if not stored_bot.autostart:
+                continue
+            bot = stored_bot.bot_id
+            if supervisor.state(bot) not in (BotState.STOPPED, BotState.ATTENTION):
+                continue
+            try:
+                await run_in_threadpool(supervisor.start, bot)
+                audit.record("system", "bot.autostart", bot)
+            except Exception as exc:  # noqa: BLE001 - one bot must not block boot
+                audit.record("system", "bot.autostart_failed", bot, str(exc))
         if await service.count_users() == 0:
             token_path = setup_token_path(root)
             if not token_path.exists():
@@ -1031,6 +1043,52 @@ def create_app(config: AppConfig) -> FastAPI:
         await run_in_threadpool(deploy_service.apply_command, bot)
         audit.record(user.email, "bot.command_reset", bot, "")
         return deploy_service.command_info(bot)
+
+    # -- restart policy and autostart ------------------------------------------------
+    @app.get("/api/bots/{bot_id}/restart-policy")
+    async def restart_policy_get(
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        return {"policy": stored.restart_policy}
+
+    @app.put("/api/bots/{bot_id}/restart-policy")
+    async def restart_policy_put(
+        payload: dict[str, object],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        policy = payload.get("policy")
+        if policy not in RESTART_POLICIES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"policy must be one of {', '.join(RESTART_POLICIES)}",
+            )
+        store.set_restart_policy(bot, str(policy))
+        with contextlib.suppress(Exception):
+            supervisor.set_restart_policy(bot, str(policy))
+        audit.record(user.email, "bot.restart_policy", bot, str(policy))
+        return {"policy": policy}
+
+    @app.get("/api/bots/{bot_id}/autostart")
+    async def autostart_get(
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        return {"autostart": stored.autostart}
+
+    @app.put("/api/bots/{bot_id}/autostart")
+    async def autostart_put(
+        payload: dict[str, object],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        enabled = payload.get("autostart")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="autostart must be a boolean")
+        store.set_autostart(bot, enabled)
+        audit.record(user.email, "bot.autostart", bot, str(enabled).lower())
+        return {"autostart": enabled}
 
     # -- live status (polled every second by the bot page) ---------------------------
     disk_cache: dict[str, tuple[float, int]] = {}

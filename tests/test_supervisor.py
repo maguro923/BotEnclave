@@ -90,13 +90,13 @@ def test_unexpected_exit_goes_to_backoff_then_restarts_on_tick() -> None:
     ident = sup.identity("alpha")
     assert ident is not None
     backend.exits[ident.pid] = 1
-    clock.now = 5.0
+    clock.now = 30.0
     sup.tick()
     assert sup.state("alpha") is BotState.BACKOFF
-    clock.now = 9.9
+    clock.now = 34.9
     sup.tick()
     assert sup.state("alpha") is BotState.BACKOFF
-    clock.now = 10.0
+    clock.now = 35.0
     sup.tick()
     assert sup.state("alpha") is BotState.RUNNING
     assert backend.started == ["alpha", "alpha"]
@@ -108,7 +108,7 @@ def test_stop_during_backoff_does_not_signal_anything() -> None:
     ident = sup.identity("alpha")
     assert ident is not None
     backend.exits[ident.pid] = 1
-    clock.now = 1.0
+    clock.now = 30.0
     sup.tick()
     assert sup.state("alpha") is BotState.BACKOFF
     sup.stop("alpha")
@@ -116,27 +116,29 @@ def test_stop_during_backoff_does_not_signal_anything() -> None:
     assert backend.stopped == []
 
 
-def test_spawn_failure_counts_as_crash() -> None:
+def test_spawn_failure_is_a_startup_failure_and_is_not_retried() -> None:
     sup, backend, _clock = make_supervisor()
     backend.fail_starts = True
     with pytest.raises(RuntimeError):
         sup.start("alpha")
-    assert sup.state("alpha") is BotState.BACKOFF
+    # The bot never got through its startup phase, so the restart
+    # policy does not apply: it parks in ATTENTION immediately.
+    assert sup.state("alpha") is BotState.ATTENTION
     assert sup.identity("alpha") is None
 
 
-def test_repeated_spawn_failures_reach_attention_without_stalling_tick() -> None:
+def test_spawn_failure_parks_in_attention_and_tick_stays_quiet() -> None:
     sup, backend, clock = make_supervisor()
     backend.fail_starts = True
     with pytest.raises(RuntimeError):
         sup.start("alpha")
-    # tick must keep processing without raising, and the machine must land
-    # in ATTENTION once the failures-without-success limit is reached.
+    # tick must keep processing without raising, and ATTENTION means
+    # no further start attempts happen on their own.
     for _ in range(10):
         clock.now += 301.0
         sup.tick()
     assert sup.state("alpha") is BotState.ATTENTION
-    assert isinstance(sup.last_errors.get("alpha"), RuntimeError)
+    assert backend.started == []
 
 
 def test_tick_survives_poll_failure_and_still_polls_others() -> None:
@@ -149,6 +151,7 @@ def test_tick_survives_poll_failure_and_still_polls_others() -> None:
     assert alpha_identity is not None and beta_identity is not None
     backend.poll_fail_pids.add(alpha_identity.pid)
     backend.exits[beta_identity.pid] = 3
+    _clock.now = 30.0
     sup.tick()  # must not raise
     assert isinstance(sup.last_errors.get("alpha"), RuntimeError)
     assert sup.state("alpha") is BotState.RUNNING  # unknown, not crashed
