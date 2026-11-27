@@ -1,0 +1,10 @@
+# Vendored third-party libraries (xterm.js, CodeMirror) are pinned
+# upstream builds, not our code. Their minified bundles trip the
+# generic high-entropy rules with false positives (for example
+# xterm.js's FourKeyMap assignment matched generic-api-key).
+# Everything outside this directory is scanned normally.
+[allowlist]
+description = "Vendored third-party static libraries"
+paths = [
+    '''botmgr/static/vendor/.*''',
+]
