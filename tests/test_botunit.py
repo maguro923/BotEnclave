@@ -166,3 +166,18 @@ def test_main_refuses_to_run_as_another_user(
         ["--root", str(tmp_path), "--bot", "demo", "--package-dir", "/pkg"]
     )
     assert rc == 1
+
+
+def test_tmux_conf_enables_mouse_for_console_scrolling() -> None:
+    """The web console attaches a tmux client in the browser terminal;
+    unless the server enables mouse mode, the client never turns on
+    mouse reporting there and the wheel cannot scroll the pane
+    history (regression test for the dead console wheel)."""
+    from pathlib import Path
+
+    import botmgr
+
+    conf = (Path(botmgr.__file__).parent / "tmux.conf").read_text(
+        encoding="utf-8"
+    )
+    assert "set-option -g mouse on" in conf

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed: the web console's mouse wheel could not scroll. The tmux
+  server now enables mouse mode, so the attached client turns on
+  mouse reporting in the browser terminal and the wheel enters
+  copy mode over the pane history. Already-running bots pick this
+  up at their next start (the option is read when a bot's tmux
+  server starts).
 - Fixed: the web console was completely dead (no output, no input)
   in sudo-based installs: the root-owned helper entry script dropped
   its arguments, so the streaming invocation
