@@ -53,7 +53,8 @@ document.querySelectorAll('button[data-action]').forEach((btn) => {
     const bot = btn.dataset.bot;
     if (btn.dataset.action === 'delete') {
       if (!confirm(window.t('dash.delete_confirm').replace('{name}', bot))) return;
-      await apiFetch('/api/bots/' + bot, { method: 'DELETE' });
+      const purge = confirm(window.t('bot.purge_confirm'));
+      await apiFetch('/api/bots/' + bot + (purge ? '?purge_files=true' : ''), { method: 'DELETE' });
       location.reload();
       return;
     }

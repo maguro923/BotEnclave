@@ -136,8 +136,21 @@ $('start-btn').onclick = async () => {
 $('stop-btn').onclick = () => apiFetch('/api/bots/' + botId + '/stop', { method: 'POST' });
 $('delete-btn').onclick = async () => {
   if (!confirm(window.t('bot.delete_confirm').replace('{name}', botId))) return;
-  await apiFetch('/api/bots/' + botId, { method: 'DELETE' });
+  const purge = confirm(window.t('bot.purge_confirm'));
+  await apiFetch('/api/bots/' + botId + (purge ? '?purge_files=true' : ''), { method: 'DELETE' });
   location.href = '/';
+};
+
+// Live state from the overview stream, so the badge follows crashes and
+// restarts after a deploy without a manual reload.
+const stateWs = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/overview');
+stateWs.onmessage = (event) => {
+  for (const entry of JSON.parse(event.data)) {
+    if (entry.id === botId) {
+      $('state-badge').textContent = entry.state;
+      $('state-badge').className = 'badge ' + entry.state;
+    }
+  }
 };
 
 // -- deploy ----------------------------------------------------------------

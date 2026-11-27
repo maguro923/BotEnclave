@@ -780,3 +780,23 @@ def test_deploys_page_requires_login_and_lists_releases(
     # The bot page's compact meta line names the active release.
     assert "meta-line" in detail.text
     assert "20261127T010203-abcd" in detail.text
+
+
+def test_pages_wire_purge_choice_and_live_state_badge(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    # Both delete flows must offer the file-purge choice; without it the
+    # API's purge_files flag is unreachable and the bot folder survives.
+    dashboard = admin.get("/")
+    assert dashboard.status_code == 200, dashboard.text
+    assert "purge_files=true" in dashboard.text
+    detail = admin.get("/bots/alpha")
+    assert detail.status_code == 200, detail.text
+    assert "purge_files=true" in detail.text
+    # The bot page badge follows the live overview stream, so a bot that
+    # crashes after a deploy does not keep showing "running".
+    assert "/ws/overview" in detail.text
+    assert "state-badge" in detail.text
