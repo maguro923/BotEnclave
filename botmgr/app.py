@@ -48,7 +48,7 @@ from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
-from botmgr import procident
+from botmgr import packages, procident
 from botmgr.access import AccessConfig, AccessMiddleware
 from botmgr.audit import AuditLog, AuditMirror
 from botmgr.auth.deps import AuthBundle, build_auth, init_auth_db
@@ -790,6 +790,145 @@ def create_app(config: AppConfig) -> FastAPI:
             "entry": result.entry,
             "state": result.state,
         }
+
+    # -- release edit sessions -----------------------------------------------------
+    @app.get("/api/bots/{bot_id}/edit-session")
+    async def edit_session_status(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        base = store.edit_session_base(stored.bot_id)
+        return {"active": base is not None, "base_release_id": base}
+
+    @app.post("/api/bots/{bot_id}/edit-session")
+    async def edit_session_begin(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
+        bot = stored.bot_id
+
+        def do_begin() -> str:
+            base = client.edit_begin(bot)
+            store.start_edit_session(bot, base)
+            return base
+
+        try:
+            base = await run_in_threadpool(do_begin)
+        except HelperError as exc:
+            raise HTTPException(status_code=400, detail=exc.message) from None
+        audit.record(user.email, "edit.begin", bot, f"base={base}")
+        return {"base_release_id": base}
+
+    @app.delete("/api/bots/{bot_id}/edit-session")
+    async def edit_session_discard(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        bot = stored.bot_id
+
+        def do_discard() -> None:
+            client.edit_discard(bot)
+            store.clear_edit_session(bot)
+
+        await run_in_threadpool(do_discard)
+        audit.record(user.email, "edit.discard", bot)
+        return {"status": "ok"}
+
+    @app.post("/api/bots/{bot_id}/edit-session/commit")
+    async def edit_session_commit(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
+        bot = stored.bot_id
+        try:
+            result = await run_in_threadpool(deploy_service.deploy_edit, bot)
+        except DeployError as exc:
+            audit.record(user.email, "edit.commit.failed", bot, _safe_detail(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        audit.record(user.email, "edit.commit", bot, f"release={result.release_id}")
+        return {
+            "release_id": result.release_id,
+            "entry": result.entry,
+            "state": result.state,
+        }
+
+    # -- extra packages --------------------------------------------------------------
+    def _active_venv(bot: str) -> Path:
+        active = store.active_release(bot)
+        if active is None:
+            raise HTTPException(
+                status_code=400, detail="this bot has no active release yet"
+            )
+        return root / "bots" / bot / "venvs" / active.release_id
+
+    @app.get("/api/bots/{bot_id}/packages")
+    async def packages_list(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        active = store.active_release(bot)
+        installed: list[dict[str, str]] = []
+        if active is not None:
+            venv = root / "bots" / bot / "venvs" / active.release_id
+            installed = await run_in_threadpool(packages.list_installed, venv)
+        return {"extras": store.list_packages(bot), "installed": installed}
+
+    @app.post("/api/bots/{bot_id}/packages")
+    async def packages_install(
+        payload: dict[str, object],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
+        bot = stored.bot_id
+        try:
+            spec = packages.validate_spec(str(payload.get("spec", "")))
+        except packages.PackageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        ok, output = await run_in_threadpool(
+            packages.install, _active_venv(bot), spec
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=400, detail=output or "pip install failed"
+            )
+        store.add_package(bot, spec)
+        audit.record(user.email, "package.install", bot, spec)
+        return {"spec": spec, "output": output}
+
+    @app.delete("/api/bots/{bot_id}/packages")
+    async def packages_remove(
+        payload: dict[str, object],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
+        bot = stored.bot_id
+        try:
+            spec = packages.validate_spec(str(payload.get("spec", "")))
+        except packages.PackageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        ok, output = await run_in_threadpool(
+            packages.uninstall, _active_venv(bot), spec
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=400, detail=output or "pip uninstall failed"
+            )
+        store.remove_package(bot, spec)
+        audit.record(user.email, "package.remove", bot, spec)
+        return {"spec": spec, "output": output}
 
     # -- webhook secret ------------------------------------------------------------
     @app.get("/api/bots/{bot_id}/webhook")

@@ -51,6 +51,17 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS edit_sessions (
+    bot_id TEXT PRIMARY KEY REFERENCES bots(bot_id),
+    base_release_id TEXT NOT NULL,
+    started_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bot_packages (
+    bot_id TEXT NOT NULL REFERENCES bots(bot_id),
+    spec TEXT NOT NULL,
+    added_at REAL NOT NULL,
+    PRIMARY KEY (bot_id, spec)
+);
 """
 
 _BOT_COLUMN_MIGRATIONS = {
@@ -246,6 +257,12 @@ class StateStore:
             self._conn.execute(
                 "DELETE FROM token_registry WHERE bot_id = ?", (bot_id,)
             )
+            self._conn.execute(
+                "DELETE FROM edit_sessions WHERE bot_id = ?", (bot_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM bot_packages WHERE bot_id = ?", (bot_id,)
+            )
             self._conn.execute("DELETE FROM bots WHERE bot_id = ?", (bot_id,))
             self._conn.commit()
 
@@ -345,6 +362,66 @@ class StateStore:
                 (bot_id, release_id),
             )
             self._conn.commit()
+
+    # -- release edit sessions -------------------------------------------
+    # An edit session stages changes to a copy of one release; the base
+    # release id is recorded so a commit can refuse to build on top of a
+    # release that is no longer active.
+
+    def start_edit_session(self, bot_id: str, base_release_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO edit_sessions"
+                " (bot_id, base_release_id, started_at) VALUES (?, ?, ?)",
+                (bot_id, base_release_id, time.time()),
+            )
+            self._conn.commit()
+
+    def edit_session_base(self, bot_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT base_release_id FROM edit_sessions WHERE bot_id = ?",
+                (bot_id,),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def clear_edit_session(self, bot_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM edit_sessions WHERE bot_id = ?", (bot_id,)
+            )
+            self._conn.commit()
+
+    # -- extra packages ----------------------------------------------------
+    # Packages installed from the panel on top of a release's
+    # requirements.txt. Recorded so every future venv build (deploy or
+    # edit commit) reproduces them; each bot's venvs stay fully separate.
+
+    def add_package(self, bot_id: str, spec: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO bot_packages (bot_id, spec, added_at)"
+                " VALUES (?, ?, ?)",
+                (bot_id, spec, time.time()),
+            )
+            self._conn.commit()
+
+    def remove_package(self, bot_id: str, spec: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM bot_packages WHERE bot_id = ? AND spec = ?",
+                (bot_id, spec),
+            )
+            self._conn.commit()
+
+    def list_packages(self, bot_id: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT spec FROM bot_packages WHERE bot_id = ?"
+                " ORDER BY added_at, spec",
+                (bot_id,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def set_token_hash(self, bot_id: str, token_hash: str | None) -> None:
         with self._lock:

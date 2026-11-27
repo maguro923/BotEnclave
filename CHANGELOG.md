@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Added: release edit sessions. The Files tab can stage an editable
+  copy of the active release; files may be changed one by one and are
+  only published when the operator saves them as a new release (the
+  smallest unit of change). The previous release is untouched and
+  remains the rollback target. A commit is refused if the active
+  release changed since editing began.
+- Added: per-bot extra packages. The Environment tab installs pip
+  packages into the bot's own per-release virtual environment only
+  (fully isolated from other bots), records them, and re-applies them
+  on every future deploy and edit commit; they can also be removed
+  again from the same panel.
+- Changed: the file editor now uses CodeMirror (vendored, no CDN)
+  with syntax highlighting for Python, YAML, JSON/JS, HTML, CSS,
+  Markdown and shell files, line numbers, a dirty indicator and
+  Ctrl/Cmd+S saving. Saving always reports its outcome explicitly:
+  a timestamped success mark or the server's error detail.
 - Changed: the panel UI was redesigned around a sidebar layout
   (soft slate sidebar in both themes, light by default with a dark
   option). The bot page groups its sections into tabs (Deploy,

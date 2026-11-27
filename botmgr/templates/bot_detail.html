@@ -3,6 +3,25 @@
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/vendor/xterm/addon-fit.js"></script>
+<link rel="stylesheet" href="/static/vendor/codemirror/codemirror.css">
+<script src="/static/vendor/codemirror/codemirror.js"></script>
+<script src="/static/vendor/codemirror/mode/python.js"></script>
+<script src="/static/vendor/codemirror/mode/yaml.js"></script>
+<script src="/static/vendor/codemirror/mode/javascript.js"></script>
+<script src="/static/vendor/codemirror/mode/xml.js"></script>
+<script src="/static/vendor/codemirror/mode/css.js"></script>
+<script src="/static/vendor/codemirror/mode/htmlmixed.js"></script>
+<script src="/static/vendor/codemirror/mode/markdown.js"></script>
+<script src="/static/vendor/codemirror/mode/shell.js"></script>
+<style>
+  .CodeMirror { border: 1px solid var(--border); border-radius: 8px; height: auto; min-height: 16rem; background: var(--input-bg); color: var(--fg); font-size: 13px; }
+  .CodeMirror-gutters { background: var(--pre-bg); border-right: 1px solid var(--border); }
+  .CodeMirror-linenumber { color: var(--muted); }
+  .CodeMirror-cursor { border-left-color: var(--fg); }
+  .CodeMirror-selected { background: var(--btn-secondary); }
+  .ok-text { color: #35a05f; }
+  .error-text { color: var(--error); }
+</style>
 {% endblock %}
 {% block content %}
 <h1>{{ bot }} <span class="badge {{ state }}" id="state-badge">{{ state }}</span></h1>
@@ -59,12 +78,24 @@
 <div data-panel="files" hidden>
 <div class="card">
   <h2>{{ t('bot.files') }}</h2>
+  <div class="notice">
+    <p><strong>{{ t('bot.edit_session_title') }}</strong></p>
+    <p class="muted">{{ t('bot.edit_session_note') }}</p>
+    <p id="edit-session-status" class="muted"></p>
+    <p>
+      <button class="secondary" id="edit-begin">{{ t('bot.edit_release') }}</button>
+      <button id="edit-commit" hidden>{{ t('bot.edit_commit') }}</button>
+      <button class="secondary" id="edit-discard" hidden>{{ t('bot.edit_discard') }}</button>
+      <span id="edit-result"></span>
+    </p>
+  </div>
   <p>
     {{ t('bot.zone') }}
     <select id="file-zone">
       <option value="data">{{ t('bot.zone_data') }}</option>
       <option value="logs">{{ t('bot.zone_logs') }}</option>
       <option value="releases">{{ t('bot.zone_releases') }}</option>
+      <option value="edit" id="zone-edit-option" hidden>{{ t('bot.zone_edit') }}</option>
     </select>
     {{ t('bot.path') }} <span id="file-path"></span>
     <button class="secondary" id="file-up">{{ t('bot.up') }}</button>
@@ -76,12 +107,12 @@
     <tbody id="file-rows"></tbody>
   </table>
   <div id="file-editor" hidden>
-    <p>{{ t('bot.editing') }} <code id="editor-path"></code></p>
+    <p>{{ t('bot.editing') }} <code id="editor-path"></code> <span id="editor-dirty" class="warn" hidden>● {{ t('bot.unsaved') }}</span></p>
     <textarea id="editor-text" rows="14" style="width: 100%;"></textarea>
     <p>
       <button id="editor-save">{{ t('bot.save') }}</button>
       <button class="secondary" id="editor-close">{{ t('bot.close') }}</button>
-      <span id="editor-result" class="warn"></span>
+      <span id="editor-result"></span>
     </p>
   </div>
 </div>
@@ -108,6 +139,20 @@
     <label><input type="checkbox" id="dotenv-mode"> {{ t('bot.dotenv_mode') }}</label>
   </p>
   <p class="notice" id="dotenv-warning" hidden>{{ t('bot.dotenv_warning') }}</p>
+</div>
+
+<div class="card">
+  <h2>{{ t('bot.packages') }}</h2>
+  <p class="muted">{{ t('bot.packages_note') }}</p>
+  <p>{{ t('bot.extra_packages') }}: <span id="pkg-extras"></span></p>
+  <form id="pkg-form">
+    <input id="pkg-spec" size="36" placeholder="{{ t('bot.package_spec_placeholder') }}">
+    <button type="submit">{{ t('bot.install') }}</button>
+    <span id="pkg-result"></span>
+  </form>
+  <pre id="pkg-output" class="muted" style="white-space: pre-wrap;" hidden></pre>
+  <p>{{ t('bot.installed') }}</p>
+  <p id="pkg-installed" class="muted"></p>
 </div>
 
 <div class="card">
@@ -269,6 +314,7 @@ loadWebhook();
 
 // -- files -----------------------------------------------------------------------
 let filePath = '';
+const writableZone = () => ['data', 'edit'].includes($('file-zone').value);
 async function loadFiles() {
   const zone = $('file-zone').value;
   $('file-path').textContent = '/' + filePath;
@@ -303,12 +349,12 @@ async function loadFiles() {
       actCell.appendChild(document.createTextNode(' '));
       actCell.appendChild(dl);
     }
-    if (zone === 'data' && entry.kind !== 'symlink') {
+    if (writableZone() && entry.kind !== 'symlink') {
       const del = document.createElement('button');
       del.className = 'danger'; del.textContent = window.t('bot.delete');
       del.onclick = async () => {
         if (!confirm(window.t('bot.file_delete_confirm').replace('{name}', entry.name))) return;
-        await apiFetch('/api/bots/' + botId + '/files?zone=data&path=' + encodeURIComponent((filePath ? filePath + '/' : '') + entry.name), { method: 'DELETE' });
+        await apiFetch('/api/bots/' + botId + '/files?zone=' + zone + '&path=' + encodeURIComponent((filePath ? filePath + '/' : '') + entry.name), { method: 'DELETE' });
         loadFiles();
       };
       actCell.appendChild(document.createTextNode(' '));
@@ -318,25 +364,91 @@ async function loadFiles() {
     tbody.appendChild(tr);
   }
 }
+let editor = null;
+let editorDirty = false;
+let editorRel = '';
+let editorZone = 'data';
+function modeFor(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  return { py: 'python', yml: 'yaml', yaml: 'yaml', json: 'javascript', js: 'javascript', html: 'htmlmixed', css: 'css', md: 'markdown', sh: 'shell' }[ext] || null;
+}
+function ensureEditor() {
+  if (editor || typeof CodeMirror === 'undefined') return;
+  editor = CodeMirror.fromTextArea($('editor-text'), {
+    lineNumbers: true, indentUnit: 4,
+    extraKeys: { 'Ctrl-S': () => saveFile(), 'Cmd-S': () => saveFile() },
+  });
+  editor.on('change', (_cm, change) => {
+    if (change.origin === 'setValue') return;
+    editorDirty = true;
+    $('editor-dirty').hidden = false;
+  });
+}
+function setEditorContent(content, name) {
+  ensureEditor();
+  if (editor) {
+    editor.setValue(content);
+    editor.setOption('mode', modeFor(name));
+    editor.clearHistory();
+    setTimeout(() => editor.refresh(), 0);
+  } else {
+    $('editor-text').value = content;
+  }
+  editorDirty = false;
+  $('editor-dirty').hidden = true;
+}
+function editorContent() {
+  return editor ? editor.getValue() : $('editor-text').value;
+}
+function setSaveStatus(kind, detail) {
+  const el = $('editor-result');
+  if (kind === 'saving') { el.className = 'muted'; el.textContent = window.t('bot.saving'); }
+  else if (kind === 'ok') { el.className = 'ok-text'; el.textContent = '✓ ' + window.t('bot.saved_at').replace('{time}', new Date().toLocaleTimeString()); }
+  else if (kind === 'error') { el.className = 'error-text'; el.textContent = window.t('bot.save_failed').replace('{detail}', detail); }
+  else { el.className = ''; el.textContent = ''; }
+}
 async function openFile(name) {
+  if (editorDirty && !confirm(window.t('bot.unsaved_confirm'))) return;
   const zone = $('file-zone').value;
   const rel = (filePath ? filePath + '/' : '') + name;
   const resp = await fetch('/api/bots/' + botId + '/files/content?zone=' + zone + '&path=' + encodeURIComponent(rel));
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok || data.kind !== 'text') { alert(window.t('bot.cannot_edit')); return; }
+  editorRel = rel;
+  editorZone = zone;
   $('editor-path').textContent = rel;
-  $('editor-text').value = data.content;
-  $('editor-save').disabled = zone !== 'data';
+  setEditorContent(data.content, name);
+  $('editor-save').disabled = !writableZone();
+  setSaveStatus('clear');
   $('file-editor').hidden = false;
+  if (editor) editor.refresh();
 }
-$('editor-save').onclick = async () => {
+async function saveFile() {
+  if (!editorRel) return true;
+  setSaveStatus('saving');
+  $('editor-save').disabled = true;
   const resp = await apiFetch('/api/bots/' + botId + '/files/content', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ zone: 'data', path: $('editor-path').textContent, content: $('editor-text').value }),
+    body: JSON.stringify({ zone: editorZone, path: editorRel, content: editorContent() }),
   });
-  showResult($('editor-result'), resp.ok ? window.t('common.saved') : window.t('bot.failed').replace('{detail}', resp.status));
+  const data = await resp.json().catch(() => ({}));
+  $('editor-save').disabled = !writableZone();
+  if (resp.ok) {
+    editorDirty = false;
+    $('editor-dirty').hidden = true;
+    setSaveStatus('ok');
+    return true;
+  }
+  setSaveStatus('error', data.detail || String(resp.status));
+  return false;
+}
+$('editor-save').onclick = () => saveFile();
+$('editor-close').onclick = () => {
+  if (editorDirty && !confirm(window.t('bot.unsaved_confirm'))) return;
+  editorDirty = false;
+  $('editor-dirty').hidden = true;
+  $('file-editor').hidden = true;
 };
-$('editor-close').onclick = () => { $('file-editor').hidden = true; };
 $('file-zone').onchange = () => { filePath = ''; $('file-editor').hidden = true; loadFiles(); };
 $('file-up').onclick = () => { filePath = filePath.split('/').slice(0, -1).join('/'); loadFiles(); };
 $('file-newdir').onclick = async () => {
@@ -344,7 +456,7 @@ $('file-newdir').onclick = async () => {
   if (!name) return;
   await apiFetch('/api/bots/' + botId + '/files/mkdir', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ zone: 'data', path: (filePath ? filePath + '/' : '') + name }),
+    body: JSON.stringify({ zone: $('file-zone').value, path: (filePath ? filePath + '/' : '') + name }),
   });
   loadFiles();
 };
@@ -353,11 +465,141 @@ $('file-newfile').onclick = async () => {
   if (!name) return;
   await apiFetch('/api/bots/' + botId + '/files/content', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ zone: 'data', path: (filePath ? filePath + '/' : '') + name, content: '' }),
+    body: JSON.stringify({ zone: $('file-zone').value, path: (filePath ? filePath + '/' : '') + name, content: '' }),
   });
   loadFiles();
 };
 loadFiles();
+
+// -- release edit session ----------------------------------------------------------
+async function loadEditSession() {
+  const resp = await fetch('/api/bots/' + botId + '/edit-session');
+  const data = await resp.json().catch(() => ({}));
+  const active = !!data.active;
+  $('edit-begin').hidden = active;
+  $('edit-commit').hidden = !active;
+  $('edit-discard').hidden = !active;
+  $('zone-edit-option').hidden = !active;
+  $('edit-session-status').textContent = active
+    ? window.t('bot.editing_based_on').replace('{id}', data.base_release_id)
+    : '';
+  if (!active && $('file-zone').value === 'edit') {
+    $('file-zone').value = 'data';
+    filePath = '';
+    loadFiles();
+  }
+  return active;
+}
+$('edit-begin').onclick = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/edit-session', { method: 'POST' });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    $('edit-result').className = 'error-text';
+    $('edit-result').textContent = window.t('bot.failed').replace('{detail}', data.detail || resp.status);
+    return;
+  }
+  $('edit-result').textContent = '';
+  await loadEditSession();
+  $('file-zone').value = 'edit';
+  filePath = '';
+  $('file-editor').hidden = true;
+  loadFiles();
+};
+$('edit-discard').onclick = async () => {
+  if (!confirm(window.t('bot.edit_discard_confirm'))) return;
+  await apiFetch('/api/bots/' + botId + '/edit-session', { method: 'DELETE' });
+  if ($('file-zone').value === 'edit') $('file-zone').value = 'data';
+  filePath = '';
+  $('file-editor').hidden = true;
+  $('edit-result').textContent = '';
+  await loadEditSession();
+  loadFiles();
+};
+$('edit-commit').onclick = async () => {
+  if (editorDirty && editorZone === 'edit') {
+    if (!await saveFile()) return;
+  }
+  $('edit-result').className = 'muted';
+  $('edit-result').textContent = window.t('bot.saving');
+  const resp = await apiFetch('/api/bots/' + botId + '/edit-session/commit', { method: 'POST' });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    $('edit-result').className = 'error-text';
+    $('edit-result').textContent = window.t('bot.failed').replace('{detail}', data.detail || resp.status);
+    return;
+  }
+  $('edit-result').className = 'ok-text';
+  $('edit-result').textContent = '✓ ' + window.t('bot.edit_committed').replace('{id}', data.release_id);
+  if (data.state) {
+    $('state-badge').textContent = data.state;
+    $('state-badge').className = 'badge ' + data.state;
+  }
+  $('file-editor').hidden = true;
+  await loadEditSession();
+  loadReleases();
+};
+loadEditSession();
+
+// -- packages ------------------------------------------------------------------------
+async function loadPackages() {
+  const resp = await fetch('/api/bots/' + botId + '/packages');
+  const data = await resp.json().catch(() => ({}));
+  const extrasEl = $('pkg-extras');
+  extrasEl.textContent = '';
+  if (!data.extras || !data.extras.length) {
+    extrasEl.textContent = window.t('bot.none');
+  }
+  for (const spec of data.extras || []) {
+    const label = document.createElement('span');
+    label.textContent = spec + ' ';
+    const btn = document.createElement('button');
+    btn.className = 'secondary';
+    btn.textContent = window.t('bot.delete');
+    btn.onclick = () => removePackage(spec);
+    label.appendChild(btn);
+    extrasEl.appendChild(label);
+    extrasEl.appendChild(document.createTextNode(' '));
+  }
+  const installed = data.installed || [];
+  $('pkg-installed').textContent = installed.length
+    ? installed.map((p) => p.name + ' ' + p.version).join(', ')
+    : window.t('bot.none');
+}
+function setPackageResult(kind, text, output) {
+  const el = $('pkg-result');
+  el.className = kind === 'error' ? 'error-text' : kind === 'ok' ? 'ok-text' : 'muted';
+  el.textContent = text;
+  const out = $('pkg-output');
+  if (output) { out.hidden = false; out.textContent = output; }
+  else { out.hidden = true; out.textContent = ''; }
+}
+$('pkg-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const spec = $('pkg-spec').value.trim();
+  if (!spec) return;
+  setPackageResult('muted', window.t('bot.installing'), '');
+  const resp = await apiFetch('/api/bots/' + botId + '/packages', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ spec }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { setPackageResult('error', window.t('bot.failed').replace('{detail}', data.detail || resp.status), ''); return; }
+  $('pkg-spec').value = '';
+  setPackageResult('ok', '✓ ' + window.t('bot.package_done'), data.output || '');
+  loadPackages();
+};
+async function removePackage(spec) {
+  setPackageResult('muted', window.t('bot.removing'), '');
+  const resp = await apiFetch('/api/bots/' + botId + '/packages', {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ spec }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { setPackageResult('error', window.t('bot.failed').replace('{detail}', data.detail || resp.status), ''); return; }
+  setPackageResult('ok', '✓ ' + window.t('bot.package_done'), data.output || '');
+  loadPackages();
+}
+loadPackages();
 
 // -- console + log ---------------------------------------------------------------
 const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
@@ -409,6 +651,7 @@ document.querySelectorAll('.tabs button').forEach((btn) => {
       panel.hidden = panel.getAttribute('data-panel') !== btn.dataset.tab;
     });
     if (btn.dataset.tab === 'console') fit.fit();
+    if (btn.dataset.tab === 'files' && editor) editor.refresh();
   });
 });
 </script>

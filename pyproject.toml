@@ -38,7 +38,13 @@ dev = [
 include = ["botmgr*"]
 
 [tool.setuptools.package-data]
-botmgr = ["templates/*.html", "static/vendor/xterm/*", "tmux.conf"]
+botmgr = [
+    "templates/*.html",
+    "static/vendor/xterm/*",
+    "static/vendor/codemirror/*",
+    "static/vendor/codemirror/mode/*",
+    "tmux.conf",
+]
 
 [tool.ruff]
 line-length = 100

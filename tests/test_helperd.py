@@ -65,6 +65,13 @@ class FakeExecutor:
     def point_current(self, bot: str, release_id: str) -> None:
         self.calls.append(("point_current", (bot, release_id)))
 
+    def edit_begin(self, bot: str) -> str:
+        self.calls.append(("edit_begin", (bot,)))
+        return "20261127T010203-ab12"
+
+    def edit_discard(self, bot: str) -> None:
+        self.calls.append(("edit_discard", (bot,)))
+
     def disk_usage(self, bot: str) -> int:
         self.calls.append(("disk_usage", (bot,)))
         return 12345
@@ -406,6 +413,19 @@ def test_publish_release_dispatch(
     bad = h.handle(
         {"op": "publish_release", "bot": "alpha", "release_id": "../escape"}
     )
+    assert bad["ok"] is False
+
+
+def test_edit_session_dispatch(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, ex = helper
+    resp = h.handle({"op": "edit_begin", "bot": "alpha"})
+    assert resp["ok"] is True, resp
+    assert resp["result"] == {"base_release_id": "20261127T010203-ab12"}
+    resp = h.handle({"op": "edit_discard", "bot": "alpha"})
+    assert resp["ok"] is True, resp
+    assert ("edit_begin", ("alpha",)) in ex.calls
+    assert ("edit_discard", ("alpha",)) in ex.calls
+    bad = h.handle({"op": "edit_begin", "bot": "alpha", "extra": 1})
     assert bad["ok"] is False
 
 

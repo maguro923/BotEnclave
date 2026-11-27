@@ -214,6 +214,16 @@ def build_release(job: dict[str, object]) -> dict[str, object]:
             fetch_git(str(job["url"]), branch if isinstance(branch, str) else None, release_dir, log)
         elif kind == "zip":
             fetch_zip(Path(str(job["zip_path"])), release_dir, log)
+        elif kind == "tree":
+            # A release edit session: the tree was staged by the helper
+            # from the previous release (link-free by construction) and
+            # edited through the panel's file operations, which cannot
+            # create links either.
+            tree = Path(str(job["tree_path"]))
+            if not tree.is_dir():
+                raise DeployError(f"edit tree missing: {tree}")
+            shutil.copytree(tree, release_dir)
+            log.write(f"copied edit tree from {tree}\n")
         else:
             raise DeployError(f"unknown deploy kind: {kind!r}")
         _unwrap_single_dir(release_dir)
@@ -246,6 +256,24 @@ def build_release(job: dict[str, object]) -> dict[str, object]:
             )
         else:
             log.write("no requirements.txt; venv left bare\n")
+        extras = job.get("extra_packages")
+        if isinstance(extras, list) and extras:
+            from botmgr.packages import validate_spec
+
+            specs = [validate_spec(str(spec)) for spec in extras]
+            _run_logged(
+                [
+                    str(venv_python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    *specs,
+                ],
+                log,
+                timeout=900,
+            )
+            log.write(f"extra packages installed: {', '.join(specs)}\n")
     return {"release_id": release_id, "entry": entry}
 
 
@@ -367,6 +395,7 @@ class DeployService:
             "root": str(self._root),
             "bot": bot,
             "release_id": release_id,
+            "extra_packages": self._store.list_packages(bot),
         }
         with tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", dir=tmp_dir, suffix=".json", delete=False
@@ -475,6 +504,32 @@ class DeployService:
                 f"activation failed; previous release restored: {exc}"
             ) from exc
         return self._supervisor.state(bot).value
+
+    def deploy_edit(self, bot: str, *, restart: bool = True) -> DeployResult:
+        """Commit the bot's edit session as a new release.
+
+        The session staged a copy of the base release under edit/; the
+        commit is refused when the active release has moved on since
+        editing began, so an edit can never silently build on top of a
+        deploy the operator did not see. A failed commit keeps the
+        session (and its files) so the operator can fix and retry."""
+        base = self._store.edit_session_base(bot)
+        if base is None:
+            raise DeployError("no edit session in progress for this bot")
+        active = self._store.active_release(bot)
+        if active is None or active.release_id != base:
+            raise DeployError(
+                "the active release changed since editing began;"
+                " discard the edit session and start again"
+            )
+        edit_dir = self._bot_dir(bot) / "edit"
+        if not edit_dir.is_dir():
+            raise DeployError("the edit staging area is missing")
+        job_spec: dict[str, object] = {"kind": "tree", "tree_path": str(edit_dir)}
+        result = self._deploy(bot, job_spec, source_ref="ui-edit", restart=restart)
+        self._store.clear_edit_session(bot)
+        self._client.edit_discard(bot)
+        return result
 
     def rollback(self, bot: str, *, restart: bool = True) -> DeployResult:
         lock = self._lock_for(bot)

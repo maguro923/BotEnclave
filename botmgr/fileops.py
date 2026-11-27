@@ -25,8 +25,8 @@ import secrets as stdlib_secrets
 from dataclasses import dataclass
 from pathlib import Path
 
-ZONES_READABLE = ("data", "logs", "releases")
-ZONES_WRITABLE = ("data",)
+ZONES_READABLE = ("data", "logs", "releases", "edit")
+ZONES_WRITABLE = ("data", "edit")
 MAX_EDIT_BYTES = 1_048_576
 MAX_READ_BYTES = 8_388_608
 MAX_PATH_CHARS = 512

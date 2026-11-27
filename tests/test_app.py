@@ -7,6 +7,7 @@ root or tmux.
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from pathlib import Path
@@ -64,6 +65,23 @@ class FakeHelper:
             for sub in ("releases", "venvs"):
                 (self._bot_root(bot) / sub).mkdir(parents=True, exist_ok=True)
             result = {"ready": True}
+        elif op == "publish_release":
+            result = {"published": request["release_id"]}
+        elif op == "point_current":
+            link = self._bot_root(bot) / "current"
+            link.unlink(missing_ok=True)
+            os.symlink(f"releases/{request['release_id']}", link)
+            result = {"current": request["release_id"]}
+        elif op == "edit_begin":
+            bot_root = self._bot_root(bot)
+            base = Path(os.readlink(bot_root / "current")).name
+            target = bot_root / "edit"
+            shutil.rmtree(target, ignore_errors=True)
+            shutil.copytree(bot_root / "releases" / base, target)
+            result = {"base_release_id": base}
+        elif op == "edit_discard":
+            shutil.rmtree(self._bot_root(bot) / "edit", ignore_errors=True)
+            result = {"discarded": bot}
         elif op == "start_bot":
             self.launches[bot] = request["launch"]
             self._pid += 1
@@ -800,3 +818,131 @@ def test_pages_wire_purge_choice_and_live_state_badge(
     # crashes after a deploy does not keep showing "running".
     assert "/ws/overview" in detail.text
     assert "state-badge" in detail.text
+
+
+def test_edit_session_commit_creates_a_new_release(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    store = StateStore(root / "botmgr.db")
+    release_id = "20261127T010203-ab12"
+    release_dir = root / "bots" / "alpha" / "releases" / release_id
+    release_dir.mkdir(parents=True)
+    (release_dir / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (release_dir / "config.yml").write_text("key: 1\n", encoding="utf-8")
+    store.record_release("alpha", release_id, "zip upload")
+    store.set_active_release("alpha", release_id)
+    os.symlink(f"releases/{release_id}", root / "bots" / "alpha" / "current")
+
+    status = admin.get("/api/bots/alpha/edit-session")
+    assert status.json() == {"active": False, "base_release_id": None}
+    begun = admin.post("/api/bots/alpha/edit-session")
+    assert begun.status_code == 200, begun.text
+    assert begun.json()["base_release_id"] == release_id
+
+    # Both files are edited first; nothing is live yet.
+    for path, content in (
+        ("main.py", "VALUE = 2\n"),
+        ("config.yml", "key: 2\n"),
+    ):
+        resp = admin.put(
+            "/api/bots/alpha/files/content",
+            json={"zone": "edit", "path": path, "content": content},
+        )
+        assert resp.status_code == 200, resp.text
+    assert (release_dir / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+    committed = admin.post("/api/bots/alpha/edit-session/commit")
+    assert committed.status_code == 200, committed.text
+    new_id = committed.json()["release_id"]
+    assert new_id != release_id
+    new_tree = root / "bots" / "alpha" / "releases" / new_id
+    assert (new_tree / "main.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (new_tree / "config.yml").read_text(encoding="utf-8") == "key: 2\n"
+    # The session is over, the staging area is gone, and the previous
+    # release is untouched so a rollback can return to it.
+    assert admin.get("/api/bots/alpha/edit-session").json()["active"] is False
+    assert not (root / "bots" / "alpha" / "edit").exists()
+    assert (release_dir / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert store.active_release("alpha").release_id == new_id  # type: ignore[union-attr]
+
+
+def test_edit_session_discard_drops_the_staging_area(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    store = StateStore(root / "botmgr.db")
+    release_id = "20261127T010203-ab12"
+    release_dir = root / "bots" / "alpha" / "releases" / release_id
+    release_dir.mkdir(parents=True)
+    (release_dir / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    store.record_release("alpha", release_id, "zip upload")
+    store.set_active_release("alpha", release_id)
+    os.symlink(f"releases/{release_id}", root / "bots" / "alpha" / "current")
+    assert admin.post("/api/bots/alpha/edit-session").status_code == 200
+    assert (root / "bots" / "alpha" / "edit" / "main.py").exists()
+    assert admin.delete("/api/bots/alpha/edit-session").status_code == 200
+    assert not (root / "bots" / "alpha" / "edit").exists()
+    assert admin.get("/api/bots/alpha/edit-session").json()["active"] is False
+    # Committing without a session is a clear error, not a silent no-op.
+    assert admin.post("/api/bots/alpha/edit-session/commit").status_code == 400
+
+
+def test_packages_endpoints_record_extras(
+    env: tuple[TestClient, FakeHelper, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from botmgr import packages
+
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    store = StateStore(root / "botmgr.db")
+    store.record_release("alpha", "20261127T010203-ab12", "zip upload")
+    store.set_active_release("alpha", "20261127T010203-ab12")
+    monkeypatch.setattr(
+        packages, "install", lambda venv, spec: (True, "installed ok")
+    )
+    monkeypatch.setattr(
+        packages, "uninstall", lambda venv, spec: (True, "removed ok")
+    )
+    monkeypatch.setattr(
+        packages,
+        "list_installed",
+        lambda venv: [{"name": "requests", "version": "2.32.3"}],
+    )
+    resp = admin.post("/api/bots/alpha/packages", json={"spec": "requests>=2"})
+    assert resp.status_code == 200, resp.text
+    assert store.list_packages("alpha") == ["requests>=2"]
+    bad = admin.post(
+        "/api/bots/alpha/packages", json={"spec": "requests; rm -rf /"}
+    )
+    assert bad.status_code == 400
+    listing = admin.get("/api/bots/alpha/packages")
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["extras"] == ["requests>=2"]
+    assert listing.json()["installed"] == [
+        {"name": "requests", "version": "2.32.3"}
+    ]
+    removed = admin.request(
+        "DELETE", "/api/bots/alpha/packages", json={"spec": "requests>=2"}
+    )
+    assert removed.status_code == 200, removed.text
+    assert store.list_packages("alpha") == []
+
+
+def test_bot_page_wires_editor_edit_session_and_packages(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    detail = admin.get("/bots/alpha")
+    assert detail.status_code == 200, detail.text
+    assert "vendor/codemirror/codemirror.js" in detail.text
+    assert "edit-session" in detail.text
+    assert "pkg-form" in detail.text

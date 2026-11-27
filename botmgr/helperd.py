@@ -116,6 +116,8 @@ class Executor(Protocol):
     def ensure_layout(self, bot: str) -> None: ...
     def publish_release(self, bot: str, release_id: str) -> None: ...
     def point_current(self, bot: str, release_id: str) -> None: ...
+    def edit_begin(self, bot: str) -> str: ...
+    def edit_discard(self, bot: str) -> None: ...
     def disk_usage(self, bot: str) -> int: ...
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]: ...
     def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]: ...
@@ -241,6 +243,15 @@ class Helper:
             release_id = validate_release_id(request.get("release_id"))
             self.executor.point_current(bot, release_id)
             return {"current": release_id}
+        if op == "edit_begin":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            return {"base_release_id": self.executor.edit_begin(bot)}
+        if op == "edit_discard":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            self.executor.edit_discard(bot)
+            return {"discarded": bot}
         if op == "disk_usage":
             _reject_unknown_keys(request, {"op", "bot"})
             bot = validate_bot_name(request.get("bot"))
@@ -283,7 +294,7 @@ class Helper:
         _reject_unknown_keys(request, allowed)
         bot = validate_bot_name(request.get("bot"))
         zone = request.get("zone")
-        if zone not in ("data", "logs", "releases"):
+        if zone not in fileops.ZONES_READABLE:
             raise RequestError("bad_request", "invalid zone")
         rel = request.get("path")
         if not isinstance(rel, str):
@@ -448,6 +459,52 @@ class SystemExecutor:
         tmp_link = bot_dir / f".current.tmp-{os.urandom(3).hex()}"
         os.symlink(f"releases/{release_id}", tmp_link)
         os.replace(tmp_link, bot_dir / "current")
+
+    def edit_begin(self, bot: str) -> str:
+        """Stage an editable copy of the active release under edit/.
+
+        Releases themselves stay immutable; the panel edits this copy
+        and a commit turns it into a brand-new release. The tree is
+        owned like a release (manager-owned, the bot's group may read)
+        so the deploy worker can build from it, while the bot itself
+        never sees the staging area. Symlinks are refused, mirroring
+        the release rules, and stale bytecode caches are not carried
+        into the next release."""
+        bot_dir = self.root / "bots" / bot
+        current = bot_dir / "current"
+        if not current.is_symlink():
+            raise RuntimeError(f"bot {bot} has no active release to edit")
+        base = Path(os.readlink(current)).name
+        validate_release_id(base)
+        source = bot_dir / "releases" / base
+        if source.is_symlink() or not source.is_dir():
+            raise RuntimeError(f"active release tree missing: {source}")
+        target = bot_dir / "edit"
+        if target.is_symlink():
+            raise RuntimeError(f"refusing a symlinked edit directory: {target}")
+        shutil.rmtree(target, ignore_errors=True)
+        target.mkdir()
+        _copy_tree_no_links(source, target)
+        manager_uid = os.stat(self.root).st_uid
+        try:
+            gid = pwd.getpwnam(username_for(bot)).pw_gid
+        except KeyError:
+            raise RuntimeError(f"no OS user for bot {bot!r}") from None
+        for dirpath, _dirnames, filenames in os.walk(target):
+            dir_path = Path(dirpath)
+            os.chown(dir_path, manager_uid, gid, follow_symlinks=False)
+            os.chmod(dir_path, 0o750, follow_symlinks=False)
+            for name in filenames:
+                file_path = dir_path / name
+                os.chown(file_path, manager_uid, gid, follow_symlinks=False)
+                os.chmod(file_path, 0o640, follow_symlinks=False)
+        return base
+
+    def edit_discard(self, bot: str) -> None:
+        target = self.root / "bots" / bot / "edit"
+        if target.is_symlink():
+            raise RuntimeError(f"refusing a symlinked edit directory: {target}")
+        shutil.rmtree(target, ignore_errors=True)
 
     def delete_user(self, bot: str) -> None:
         user = username_for(bot)
@@ -857,6 +914,23 @@ class SystemExecutor:
         if unit_path.exists():
             _run(["systemctl", "stop", self._unit_name(bot)])
         return exit_code if exit_code is not None else -1
+
+
+def _copy_tree_no_links(source: Path, target: Path) -> None:
+    """Copy a release tree into the edit staging area. Symlinks are
+    refused (releases never legitimately contain them) and bytecode
+    caches are skipped so they cannot leak into the next release."""
+    for entry in os.scandir(source):
+        if entry.is_symlink():
+            raise RuntimeError(f"refusing to copy a symlinked entry: {entry.path}")
+        dest = target / entry.name
+        if entry.is_dir(follow_symlinks=False):
+            if entry.name == "__pycache__":
+                continue
+            dest.mkdir()
+            _copy_tree_no_links(Path(entry.path), dest)
+        else:
+            shutil.copy2(entry.path, dest)
 
 
 def _write_fifo(fifo: Path, payload: bytes, timeout: float) -> None:

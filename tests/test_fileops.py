@@ -90,6 +90,10 @@ def test_zone_rules(bot_root: Path) -> None:
         fileops.delete_path(bot_root, "logs", "console.log")
     with pytest.raises(FileOpError):
         fileops.rename_path(bot_root, "releases", "r1/bot.py", "r1/x.py")
+    # The edit staging zone is readable and writable like data.
+    (bot_root / "edit").mkdir(exist_ok=True)
+    fileops.write_file(bot_root, "edit", "bot.py", "edited")
+    assert fileops.read_file(bot_root, "edit", "bot.py")["content"] == "edited"
 
 
 def test_write_is_atomic_and_bounded(bot_root: Path) -> None:

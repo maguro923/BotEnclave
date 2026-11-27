@@ -141,6 +141,13 @@ class HelperClient:
             {"op": "point_current", "bot": bot, "release_id": release_id}
         )
 
+    def edit_begin(self, bot: str) -> str:
+        result = self._call({"op": "edit_begin", "bot": bot})
+        return str(result["base_release_id"])
+
+    def edit_discard(self, bot: str) -> None:
+        self._call({"op": "edit_discard", "bot": bot})
+
     def disk_usage(self, bot: str) -> int:
         result = self._call({"op": "disk_usage", "bot": bot})
         return int(result["bytes"])

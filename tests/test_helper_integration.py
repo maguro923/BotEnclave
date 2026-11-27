@@ -433,3 +433,43 @@ def test_panel_written_files_belong_to_the_bot(helper: Helper) -> None:
     assert resp["ok"] is True, resp
     made = helper.root / "bots" / BOT_A / "data" / "subdir"
     assert made.stat().st_uid == uid
+
+
+def test_edit_begin_stages_a_copy_and_discard_removes_it(helper: Helper) -> None:
+    resp = helper.handle({"op": "create_user", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    release_id = "20261127T010203-ab12"
+    release_dir = helper.root / "bots" / BOT_A / "releases" / release_id
+    release_dir.mkdir(parents=True)
+    (release_dir / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (helper.root / "bots" / BOT_A / "venvs" / release_id).mkdir(parents=True)
+    resp = helper.handle(
+        {"op": "publish_release", "bot": BOT_A, "release_id": release_id}
+    )
+    assert resp["ok"] is True, resp
+    resp = helper.handle(
+        {"op": "point_current", "bot": BOT_A, "release_id": release_id}
+    )
+    assert resp["ok"] is True, resp
+    resp = helper.handle({"op": "edit_begin", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    assert resp["result"]["base_release_id"] == release_id
+    staged = helper.root / "bots" / BOT_A / "edit" / "main.py"
+    assert staged.read_text(encoding="utf-8") == "VALUE = 1\n"
+    # The staged copy is editable through the file operations, and the
+    # release itself does not change.
+    resp = helper.handle(
+        {
+            "op": "file_write",
+            "bot": BOT_A,
+            "zone": "edit",
+            "path": "main.py",
+            "content": "VALUE = 2\n",
+        }
+    )
+    assert resp["ok"] is True, resp
+    assert staged.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (release_dir / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    resp = helper.handle({"op": "edit_discard", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    assert not (helper.root / "bots" / BOT_A / "edit").exists()

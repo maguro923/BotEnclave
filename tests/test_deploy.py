@@ -63,6 +63,11 @@ class FakeTransport:
             os.symlink(f"releases/{request['release_id']}", tmp_link)
             os.replace(tmp_link, bot_dir / "current")
             return {"ok": True, "result": {"current": request["release_id"]}}
+        if op == "edit_discard":
+            import shutil
+
+            shutil.rmtree(self.root / "bots" / str(bot) / "edit", ignore_errors=True)
+            return {"ok": True, "result": {"discarded": bot}}
         if op == "start_bot":
             self._pid += 1
             return {
@@ -422,3 +427,53 @@ def test_stale_job_files_are_swept_on_deploy(
     deploy.deploy_zip("alpha", zip_path, "ok.zip")
     assert not stale.exists()  # a dead manager's job file (with credentials)
     assert fresh.exists()
+
+
+def test_deploy_edit_commit_creates_new_release_and_keeps_rollback(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+) -> None:
+    import shutil
+
+    deploy, store, _supervisor, root = service
+    zip1 = make_zip(root / "v1.zip", {"bot.py": BOT_PY})
+    first = deploy.deploy_zip("alpha", zip1, "v1.zip")
+    bot_dir = root / "bots" / "alpha"
+    # Stage an edit of the active release, as the helper's edit_begin
+    # would, changing two files before the commit.
+    edit_dir = bot_dir / "edit"
+    shutil.copytree(bot_dir / "releases" / first.release_id, edit_dir)
+    (edit_dir / "bot.py").write_text(BOT_PY + "# edited\n", encoding="utf-8")
+    (edit_dir / "config.yml").write_text("key: value\n", encoding="utf-8")
+    store.start_edit_session("alpha", first.release_id)
+    result = deploy.deploy_edit("alpha")
+    assert result.release_id != first.release_id
+    new_tree = bot_dir / "releases" / result.release_id
+    assert (new_tree / "config.yml").read_text(encoding="utf-8") == "key: value\n"
+    assert "# edited" in (new_tree / "bot.py").read_text(encoding="utf-8")
+    active = store.active_release("alpha")
+    assert active is not None and active.release_id == result.release_id
+    assert store.edit_session_base("alpha") is None
+    assert not edit_dir.exists()
+    # The pre-edit release survived untouched: rollback returns to it.
+    back = deploy.rollback("alpha")
+    assert back.release_id == first.release_id
+
+
+def test_deploy_edit_refuses_a_stale_base(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+) -> None:
+    import shutil
+
+    deploy, store, _supervisor, root = service
+    zip1 = make_zip(root / "v1.zip", {"bot.py": BOT_PY})
+    first = deploy.deploy_zip("alpha", zip1, "v1.zip")
+    bot_dir = root / "bots" / "alpha"
+    edit_dir = bot_dir / "edit"
+    shutil.copytree(bot_dir / "releases" / first.release_id, edit_dir)
+    # The session claims a base that is not the active release.
+    store.start_edit_session("alpha", "20260101T000000-dead")
+    with pytest.raises(DeployError):
+        deploy.deploy_edit("alpha")
+    # A refused commit keeps the session and its files for a retry.
+    assert store.edit_session_base("alpha") == "20260101T000000-dead"
+    assert edit_dir.exists()
