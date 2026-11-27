@@ -57,7 +57,7 @@ def render_helper_entry(
         f"export BOTENCLAVE_PACKAGE_DIR={package_dir}\n"
         f"{group_line}"
         f"export PYTHONPATH={package_dir.parent}\n"
-        "exec /usr/bin/python3 -m botmgr.helperd\n"
+        "exec /usr/bin/python3 -m botmgr.helperd \"$@\"\n"
     )
 
 

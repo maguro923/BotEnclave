@@ -1627,11 +1627,32 @@ async def _serve_console(
     try:
         if first is not None:
             await _forward_console_input(first, client, bot, stream)
-        await _pump_console(websocket, stream)
+        first_frame = await run_in_threadpool(_peek_stream_frame, stream)
+        if first_frame is not None and first_frame.get("type") == "exit":
+            # The stream died before producing anything (the helper
+            # entry rejected the streaming arguments, tmux is gone,
+            # ...). Degrade to snapshot polling instead of leaving
+            # the operator with a dead console.
+            await run_in_threadpool(stream.close)
+            stream = None
+            await _serve_console_snapshots(websocket, client, bot, None)
+            return
+        await _pump_console(websocket, stream, first_frame)
     except WebSocketDisconnect:
         pass
     finally:
-        await run_in_threadpool(stream.close)
+        if stream is not None:
+            await run_in_threadpool(stream.close)
+
+
+def _peek_stream_frame(stream: Any) -> dict[str, Any] | None:
+    import queue as queue_module
+
+    try:
+        frame = stream.frames.get(timeout=3.0)
+    except queue_module.Empty:
+        return None
+    return frame if isinstance(frame, dict) else None
 
 
 def _console_resize(message: str) -> tuple[int, int] | None:
@@ -1664,12 +1685,20 @@ async def _forward_console_input(
             await run_in_threadpool(stream.send_resize, size[0], size[1])
 
 
-async def _pump_console(websocket: WebSocket, stream: Any) -> None:
+async def _pump_console(
+    websocket: WebSocket,
+    stream: Any,
+    first_frame: dict[str, Any] | None = None,
+) -> None:
     import base64
 
     async def send_frames() -> None:
+        pending = first_frame
         while True:
-            frame = await run_in_threadpool(stream.frames.get)
+            if pending is not None:
+                frame, pending = pending, None
+            else:
+                frame = await run_in_threadpool(stream.frames.get)
             if not isinstance(frame, dict) or frame.get("type") == "exit":
                 return
             if frame.get("type") == "data":

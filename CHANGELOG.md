@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed: the web console was completely dead (no output, no input)
+  in sudo-based installs: the root-owned helper entry script dropped
+  its arguments, so the streaming invocation
+  (`--console-stream <bot> <cols> <rows>`) silently started the
+  helper's request/response mode instead. The entry now forwards
+  `"$@"`.
+- Fixed: if a console byte stream dies before its first frame, the
+  console WebSocket now falls back to snapshot polling instead of
+  leaving the operator with a dead console.
 - Changed: the interactive console is now a raw terminal stream
   (the helper attaches a tmux client to the bot's pane on a PTY and
   pumps bytes both ways, like a hypervisor web console) instead of

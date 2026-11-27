@@ -46,6 +46,11 @@ def test_manager_unit_and_sudoers() -> None:
     assert entry.startswith("#!/bin/sh")
     assert "BOTENCLAVE_ROOT=/srv/botenclave" in entry
     assert "botmgr.helperd" in entry
+    # The entry must forward its arguments: the streaming console
+    # spawns it with --console-stream <bot> <cols> <rows>, and dropping
+    # them silently starts the request/response mode instead, leaving
+    # the web console dead (regression test).
+    assert 'helperd "$@"' in entry
 
 
 def test_helper_entry_exports_manager_group_when_given() -> None:

@@ -417,6 +417,51 @@ def test_console_streaming_mode(
     assert fake.capture["alpha"] is True
 
 
+def test_console_stream_instant_exit_falls_back_to_snapshots(
+    env: tuple[TestClient, FakeHelper, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream that dies before its first frame (e.g. the helper
+    entry rejected the streaming arguments) must degrade to snapshot
+    polling instead of leaving a dead console."""
+    import json
+    import queue as queue_module
+
+    from botmgr.helper import HelperClient
+
+    class DeadStream:
+        def __init__(self) -> None:
+            self.frames: queue_module.Queue[dict[str, Any]] = queue_module.Queue()
+            self.frames.put({"type": "exit"})
+            self.closed = False
+
+        def send_data(self, data: bytes) -> None:
+            pass
+
+        def send_resize(self, cols: int, rows: int) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = DeadStream()
+    monkeypatch.setattr(
+        HelperClient,
+        "open_console_stream",
+        lambda self, bot, cols, rows: stream,
+    )
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    guest_a = invite_and_login(admin, client, GUEST_A)
+    create_bot(guest_a, "alpha")
+    guest_a.post("/api/bots/alpha/start")
+    with guest_a.websocket_connect("/ws/bots/alpha/console") as ws:
+        ws.send_json({"type": "resize", "cols": 120, "rows": 40})
+        message = json.loads(ws.receive_text())
+        assert message["type"] == "screen"
+    assert stream.closed
+
+
 # -- user deletion ----------------------------------------------------------------
 
 
