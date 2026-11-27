@@ -148,3 +148,38 @@ def test_pip_children_never_inherit_the_manager_pythonpath(
         assert env is not None
         assert "PYTHONPATH" not in env
         assert "PYTHONHOME" not in env
+
+
+def test_run_pip_child_resets_umask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pip runs from the manager process, which serves with a
+    private umask; without a reset in the child, packages installed
+    into a bot's live venv would be created 0600 and the bot could
+    not read them."""
+    import os
+
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("", encoding="ascii")
+    captured: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(
+            args=args[0] if args else [], returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(packages.subprocess, "run", fake_run)
+    ok, _output = packages.install(venv, "requests")
+    assert ok
+    preexec = captured["preexec_fn"]
+    assert callable(preexec)
+    previous = os.umask(0o077)
+    try:
+        preexec()  # type: ignore[operator]
+        current = os.umask(0o022)
+        os.umask(current)
+    finally:
+        os.umask(previous)
+    assert current == 0o022

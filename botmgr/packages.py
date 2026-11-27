@@ -79,6 +79,14 @@ def pip_env() -> dict[str, str]:
     return env
 
 
+def _reset_umask() -> None:
+    # pip installs into a bot's live venv from the manager process,
+    # which serves with a private umask; files pip created under it
+    # would be unreadable by the bot. The child resets the mask so
+    # installed packages keep the conventional modes.
+    os.umask(0o022)
+
+
 def _run_pip(
     venv_dir: Path, args: list[str], timeout: int = PIP_TIMEOUT_SECONDS
 ) -> tuple[bool, str]:
@@ -93,6 +101,7 @@ def _run_pip(
             timeout=timeout,
             check=False,
             env=pip_env(),
+            preexec_fn=_reset_umask,
         )
     except subprocess.TimeoutExpired:
         return False, f"pip timed out after {timeout}s"

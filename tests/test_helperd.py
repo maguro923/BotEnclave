@@ -516,3 +516,31 @@ def test_store_credential_dispatches(helper: tuple[Helper, FakeExecutor]) -> Non
     assert fake.calls == [("store_credential", ("alpha", "A=1\n"))]
     bad = h.handle({"op": "store_credential", "bot": "alpha", "text": 3})
     assert bad["ok"] is False
+
+
+def test_main_resets_umask_inherited_from_manager(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The manager serves with a private umask (its databases hold
+    session tokens) and children inherit it — sudo preserves it too.
+    The helper entry point must reset its own mask on startup, or
+    anything it creates without an explicit mode (and the processes
+    it spawns where no PAM stack intervenes) inherits 0077 and files
+    the bots or the manager must read come out owner-only."""
+    import io
+    import os
+
+    from botmgr import helperd
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
+    monkeypatch.setenv("BOTENCLAVE_ROOT", "/nonexistent-test-root")
+    previous = os.umask(0o077)
+    try:
+        rc = helperd.main(["helperd"])
+        current = os.umask(0o022)
+        os.umask(current)
+    finally:
+        os.umask(previous)
+    assert rc == 1  # the malformed request is rejected, as before
+    assert '"ok": false' in capsys.readouterr().out
+    assert current == 0o022

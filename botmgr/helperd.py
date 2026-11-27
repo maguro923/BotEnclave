@@ -1289,6 +1289,12 @@ def run_console_stream(
 
 
 def main(argv: list[str]) -> int:
+    # The manager serves with a private umask (its databases hold
+    # session tokens) and sudo preserves the caller's umask, so set
+    # the conventional one explicitly: the tmux servers started here
+    # pass it on to the bots' panes and log capture, whose files the
+    # manager and the bots must be able to read.
+    os.umask(0o022)
     if len(argv) == 5 and argv[1] == "--console-stream":
         try:
             cols, rows = int(argv[3]), int(argv[4])

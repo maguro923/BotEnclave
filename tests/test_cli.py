@@ -90,3 +90,42 @@ def test_main_setup_token_command(
     assert main(["--root", str(tmp_path), "setup-token"]) == 0
     printed = capsys.readouterr().out.strip()
     assert printed == (tmp_path / "setup-token").read_text(encoding="ascii").strip()
+
+
+def test_harden_data_root_tightens_existing_files(tmp_path: Path) -> None:
+    """Regression test for the world-readable databases: auth.db
+    holds live session tokens, so the serve startup must leave the
+    data root's manager-only files at 0600 (they were created 0644
+    by SQLite under the default umask and any local user — a bot
+    included — could read them)."""
+    import os
+    import stat
+
+    from botmgr.cli import harden_data_root
+
+    files = ("auth.db", "auth.db-wal", "botmgr.db", "audit.log", "manager.lock")
+    for name in files:
+        path = tmp_path / name
+        path.write_text("x", encoding="ascii")
+        path.chmod(0o644)
+    for name in ("tmp", ".cache"):
+        directory = tmp_path / name
+        directory.mkdir()
+        directory.chmod(0o755)
+
+    previous = os.umask(0o022)
+    try:
+        harden_data_root(tmp_path)
+        current = os.umask(0o077)
+        os.umask(current)
+    finally:
+        os.umask(previous)
+    assert current == 0o077
+    for name in files:
+        mode = stat.S_IMODE((tmp_path / name).stat().st_mode)
+        assert mode == 0o600, name
+    for name in ("tmp", ".cache"):
+        mode = stat.S_IMODE((tmp_path / name).stat().st_mode)
+        assert mode == 0o700, name
+    # Missing entries are fine (a fresh root has none of them yet).
+    harden_data_root(tmp_path / "does-not-exist")

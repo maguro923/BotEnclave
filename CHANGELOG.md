@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed (security): the panel's databases were world-readable on
+  disk. auth.db — which holds live session tokens and password
+  hashes — plus botmgr.db and audit.log were created mode 0644, so
+  any local user, including a bot's own OS user, could read them; a
+  stolen session cookie gave full administrator access. The serve
+  process now runs with a private umask and tightens existing files
+  to 0600 at startup (manager-only directories to 0700). The helper
+  and pip children reset their own umask, since they create files
+  the bots must read and sudo preserves the caller's mask.
 - Fixed: the web console's mouse wheel could not scroll. The tmux
   server now enables mouse mode, so the attached client turns on
   mouse reporting in the browser terminal and the wheel enters

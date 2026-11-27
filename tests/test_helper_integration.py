@@ -640,3 +640,4 @@ def test_edit_begin_without_a_release_stages_an_empty_tree(helper: Helper) -> No
     assert resp["ok"] is True, resp
     assert not edit_dir.exists()
     h.handle({"op": "delete_user", "bot": BOT_A})
+

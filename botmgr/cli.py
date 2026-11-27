@@ -89,6 +89,41 @@ def _web_secret(root: Path) -> str:
     return value
 
 
+# Files and directories in the data root that only the manager may
+# read: auth.db holds live session tokens and password hashes,
+# botmgr.db the panel state, the audit log the action history. The
+# databases are created by SQLite under the process umask, so the
+# serve process runs with a private umask; files left by earlier
+# versions are tightened in place at startup. Bot trees are not
+# affected: the helper resets its own umask (it creates files the
+# bots read), and pip children do the same (packages.py).
+_PRIVATE_FILES = (
+    "auth.db",
+    "auth.db-wal",
+    "auth.db-shm",
+    "botmgr.db",
+    "botmgr.db-wal",
+    "botmgr.db-shm",
+    "audit.log",
+    "manager.lock",
+)
+_PRIVATE_DIRS = ("tmp", ".cache")
+
+
+def harden_data_root(root: Path) -> None:
+    os.umask(0o077)
+    for name in _PRIVATE_FILES:
+        try:
+            (root / name).chmod(0o600)
+        except FileNotFoundError:
+            pass
+    for name in _PRIVATE_DIRS:
+        try:
+            (root / name).chmod(0o700)
+        except FileNotFoundError:
+            pass
+
+
 async def _unlock(root: Path, email: str) -> bool:
     from botmgr.auth.deps import build_auth, init_auth_db
     from botmgr.auth.service import AuthService
@@ -389,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
 
         configure_logging()
         logger = logging.getLogger("botmgr.serve")
+        harden_data_root(args.root)
         if args.no_cookie_secure:
             logger.warning(
                 "session cookies will not require HTTPS; do not expose"
