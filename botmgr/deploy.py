@@ -228,9 +228,10 @@ def build_release(job: dict[str, object]) -> dict[str, object]:
             fetch_zip(Path(str(job["zip_path"])), release_dir, log)
         elif kind == "tree":
             # A release edit session: the tree was staged by the helper
-            # from the previous release (link-free by construction) and
-            # edited through the panel's file operations, which cannot
-            # create links either.
+            # from the previous release — or empty, for a first release
+            # written by hand (link-free by construction either way) —
+            # and edited through the panel's file operations, which
+            # cannot create links either.
             tree = Path(str(job["tree_path"]))
             if not tree.is_dir():
                 raise DeployError(f"edit tree missing: {tree}")
@@ -587,7 +588,16 @@ class DeployService:
         if base is None:
             raise DeployError("no edit session in progress for this bot")
         active = self._store.active_release(bot)
-        if active is None or active.release_id != base:
+        if base == "":
+            # Scratch session: it began with no release at all, so a
+            # release that appeared in the meantime is just as much a
+            # base change as a moved-on active release.
+            if active is not None:
+                raise DeployError(
+                    "a release was deployed since editing began;"
+                    " discard the edit session and start again"
+                )
+        elif active is None or active.release_id != base:
             raise DeployError(
                 "the active release changed since editing began;"
                 " discard the edit session and start again"

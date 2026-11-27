@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added: a bot with no release yet can now start a panel edit
+  session from an empty staging area, so its first release can be
+  written by hand (for example a minimal `main.py`) instead of
+  requiring a zip upload or a git deploy first. The commit is
+  refused if a release was deployed while the session was open.
 - Added: a per-bot restart policy on the bot page — never restart,
   retry once after 5 seconds (the default), or retry up to three
   times (5s / 15s / 60s) — replacing the fixed backoff schedule and

@@ -522,22 +522,29 @@ class SystemExecutor:
         so the deploy worker can build from it, while the bot itself
         never sees the staging area. Symlinks are refused, mirroring
         the release rules, and stale bytecode caches are not carried
-        into the next release."""
+        into the next release.
+
+        A bot with no release yet gets an empty staging area (a
+        scratch session, base "") so its first release can be written
+        by hand in the panel; the commit path refuses if a release
+        has appeared in the meantime."""
         bot_dir = self.root / "bots" / bot
         current = bot_dir / "current"
-        if not current.is_symlink():
-            raise RuntimeError(f"bot {bot} has no active release to edit")
-        base = Path(os.readlink(current)).name
-        validate_release_id(base)
-        source = bot_dir / "releases" / base
-        if source.is_symlink() or not source.is_dir():
-            raise RuntimeError(f"active release tree missing: {source}")
+        source: Path | None = None
+        base = ""
+        if current.is_symlink():
+            base = Path(os.readlink(current)).name
+            validate_release_id(base)
+            source = bot_dir / "releases" / base
+            if source.is_symlink() or not source.is_dir():
+                raise RuntimeError(f"active release tree missing: {source}")
         target = bot_dir / "edit"
         if target.is_symlink():
             raise RuntimeError(f"refusing a symlinked edit directory: {target}")
         shutil.rmtree(target, ignore_errors=True)
         target.mkdir()
-        _copy_tree_no_links(source, target)
+        if source is not None:
+            _copy_tree_no_links(source, target)
         manager_uid = os.stat(self.root).st_uid
         try:
             gid = pwd.getpwnam(username_for(bot)).pw_gid

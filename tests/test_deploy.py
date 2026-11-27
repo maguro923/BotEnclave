@@ -504,3 +504,38 @@ def test_run_logged_children_do_not_inherit_pythonpath(
     env = seen.get("env")
     assert isinstance(env, dict)
     assert "PYTHONPATH" not in env
+
+
+def test_deploy_edit_from_scratch_creates_the_first_release(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+) -> None:
+    deploy, store, _supervisor, root = service
+    bot_dir = root / "bots" / "alpha"
+    edit_dir = bot_dir / "edit"
+    edit_dir.mkdir(parents=True)
+    (edit_dir / "bot.py").write_text(BOT_PY, encoding="utf-8")
+    store.start_edit_session("alpha", "")
+    result = deploy.deploy_edit("alpha")
+    active = store.active_release("alpha")
+    assert active is not None and active.release_id == result.release_id
+    assert (bot_dir / "releases" / result.release_id / "bot.py").exists()
+    assert store.edit_session_base("alpha") is None
+    assert not edit_dir.exists()
+
+
+def test_deploy_edit_scratch_refuses_when_a_release_appeared(
+    service: tuple[DeployService, StateStore, Supervisor, Path],
+) -> None:
+    deploy, store, _supervisor, root = service
+    bot_dir = root / "bots" / "alpha"
+    edit_dir = bot_dir / "edit"
+    edit_dir.mkdir(parents=True)
+    (edit_dir / "bot.py").write_text(BOT_PY, encoding="utf-8")
+    store.start_edit_session("alpha", "")
+    zip1 = make_zip(root / "v1.zip", {"bot.py": BOT_PY})
+    deploy.deploy_zip("alpha", zip1, "v1.zip")
+    with pytest.raises(DeployError, match="since editing began"):
+        deploy.deploy_edit("alpha")
+    # The refused commit keeps the session and its files.
+    assert store.edit_session_base("alpha") == ""
+    assert (edit_dir / "bot.py").exists()

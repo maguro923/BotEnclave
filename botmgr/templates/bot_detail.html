@@ -589,7 +589,9 @@ async function loadEditSession() {
   $('edit-discard').hidden = !active;
   $('zone-edit-option').hidden = !active;
   $('edit-session-status').textContent = active
-    ? window.t('bot.editing_based_on').replace('{id}', data.base_release_id)
+    ? (data.base_release_id
+        ? window.t('bot.editing_based_on').replace('{id}', data.base_release_id)
+        : window.t('bot.editing_scratch'))
     : '';
   if (!active && $('file-zone').value === 'edit') {
     $('file-zone').value = 'data';

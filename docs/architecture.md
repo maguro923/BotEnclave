@@ -97,6 +97,13 @@ verify the entry point's syntax in a separate process, then switch
 the `current` symlink. Two generations are kept (active + previous),
 which is what rollback uses.
 
+Panel editing works on a staged copy of the active release under
+`edit/`; committing the session publishes it as a new release, and
+the commit is refused if the active release moved on in the
+meantime. A bot with no release yet gets an empty staging area
+instead, so its first release can be written by hand in the panel;
+a release deployed in the meantime likewise refuses the commit.
+
 ## Security design
 
 **Threat model.** Assets: bot secrets (e.g. Discord tokens), panel

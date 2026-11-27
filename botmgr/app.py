@@ -886,7 +886,7 @@ def create_app(config: AppConfig) -> FastAPI:
             base = await run_in_threadpool(do_begin)
         except HelperError as exc:
             raise HTTPException(status_code=400, detail=exc.message) from None
-        audit.record(user.email, "edit.begin", bot, f"base={base}")
+        audit.record(user.email, "edit.begin", bot, f"base={base or 'scratch'}")
         return {"base_release_id": base}
 
     @app.delete("/api/bots/{bot_id}/edit-session")

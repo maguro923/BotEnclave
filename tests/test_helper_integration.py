@@ -609,3 +609,34 @@ def test_store_credential_encrypts_via_helper(helper: Helper) -> None:
     assert out.stdout == "MY_TOKEN=cred-xyz\n"
     h.handle({"op": "delete_bot_files", "bot": BOT_A})
     h.handle({"op": "delete_user", "bot": BOT_A})
+
+
+def test_edit_begin_without_a_release_stages_an_empty_tree(helper: Helper) -> None:
+    """A brand-new bot has nothing to copy: the edit session starts
+    from an empty staging area so the first release can be written by
+    hand in the panel."""
+    h = helper
+    resp = h.handle({"op": "create_user", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    resp = h.handle({"op": "edit_begin", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    assert resp["result"]["base_release_id"] == ""
+    edit_dir = h.root / "bots" / BOT_A / "edit"
+    assert edit_dir.is_dir()
+    assert list(edit_dir.iterdir()) == []
+    assert edit_dir.stat().st_mode & 0o777 == 0o750
+    resp = h.handle(
+        {
+            "op": "file_write",
+            "bot": BOT_A,
+            "zone": "edit",
+            "path": "main.py",
+            "content": "VALUE = 1\n",
+        }
+    )
+    assert resp["ok"] is True, resp
+    assert (edit_dir / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    resp = h.handle({"op": "edit_discard", "bot": BOT_A})
+    assert resp["ok"] is True, resp
+    assert not edit_dir.exists()
+    h.handle({"op": "delete_user", "bot": BOT_A})

@@ -84,10 +84,15 @@ class FakeHelper:
             result = {"current": request["release_id"]}
         elif op == "edit_begin":
             bot_root = self._bot_root(bot)
-            base = Path(os.readlink(bot_root / "current")).name
             target = bot_root / "edit"
             shutil.rmtree(target, ignore_errors=True)
-            shutil.copytree(bot_root / "releases" / base, target)
+            current = bot_root / "current"
+            if current.is_symlink():
+                base = Path(os.readlink(current)).name
+                shutil.copytree(bot_root / "releases" / base, target)
+            else:
+                base = ""
+                target.mkdir(parents=True)
             result = {"base_release_id": base}
         elif op == "edit_discard":
             shutil.rmtree(self._bot_root(bot) / "edit", ignore_errors=True)
@@ -900,6 +905,34 @@ def test_edit_session_commit_creates_a_new_release(
     assert not (root / "bots" / "alpha" / "edit").exists()
     assert (release_dir / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert store.active_release("alpha").release_id == new_id  # type: ignore[union-attr]
+
+
+def test_edit_session_from_scratch_creates_the_first_release(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+
+    # A brand-new bot has no release to copy: the session starts empty.
+    begun = admin.post("/api/bots/alpha/edit-session")
+    assert begun.status_code == 200, begun.text
+    assert begun.json()["base_release_id"] == ""
+    status = admin.get("/api/bots/alpha/edit-session")
+    assert status.json() == {"active": True, "base_release_id": ""}
+
+    resp = admin.put(
+        "/api/bots/alpha/files/content",
+        json={"zone": "edit", "path": "main.py", "content": "VALUE = 1\n"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    committed = admin.post("/api/bots/alpha/edit-session/commit")
+    assert committed.status_code == 200, committed.text
+    new_id = committed.json()["release_id"]
+    new_tree = root / "bots" / "alpha" / "releases" / new_id
+    assert (new_tree / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert admin.get("/api/bots/alpha/edit-session").json()["active"] is False
 
 
 def test_edit_session_discard_drops_the_staging_area(
