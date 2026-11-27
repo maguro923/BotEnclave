@@ -347,6 +347,76 @@ def test_console_private_mode_lifecycle(
     assert "alpha" in fake.cleared
 
 
+def test_console_streaming_mode(
+    env: tuple[TestClient, FakeHelper, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the transport can stream, the console WebSocket carries the
+    pane's raw bytes both ways (hypervisor-console style), with the
+    browser's first resize sizing the PTY."""
+    import base64
+    import queue as queue_module
+
+    from botmgr.helper import HelperClient
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.frames: queue_module.Queue[dict[str, Any]] = queue_module.Queue()
+            self.sent: list[bytes] = []
+            self.resizes: list[tuple[int, int]] = []
+            self.closed = False
+            self.frames.put(
+                {
+                    "type": "data",
+                    "data": base64.b64encode(b"stream-hello").decode(),
+                }
+            )
+
+        def send_data(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def send_resize(self, cols: int, rows: int) -> None:
+            self.resizes.append((cols, rows))
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = FakeStream()
+    opened: list[tuple[str, int, int]] = []
+
+    def fake_open(
+        self: HelperClient, bot: str, cols: int, rows: int
+    ) -> FakeStream:
+        opened.append((bot, cols, rows))
+        return stream
+
+    monkeypatch.setattr(HelperClient, "open_console_stream", fake_open)
+    client, fake, root = env
+    admin = setup_admin(client, root)
+    guest_a = invite_and_login(admin, client, GUEST_A)
+    create_bot(guest_a, "alpha")
+    guest_a.post("/api/bots/alpha/start")
+    with guest_a.websocket_connect("/ws/bots/alpha/console") as ws:
+        ws.send_json({"type": "resize", "cols": 120, "rows": 40})
+        assert ws.receive_bytes() == b"stream-hello"
+        ws.send_bytes(b"ls\n")
+        ws.send_json({"type": "resize", "cols": 100, "rows": 30})
+        deadline = time.time() + 20
+        while time.time() < deadline and (
+            stream.sent != [b"ls\n"] or stream.resizes != [(100, 30)]
+        ):
+            time.sleep(0.05)
+    assert opened == [("alpha", 120, 40)]
+    assert stream.sent == [b"ls\n"]
+    assert stream.resizes == [(100, 30)]
+    deadline = time.time() + 20
+    while time.time() < deadline and not stream.closed:
+        time.sleep(0.05)
+    assert stream.closed
+    # Private mode still applies to the streamed console.
+    assert fake.capture["alpha"] is True
+
+
 # -- user deletion ----------------------------------------------------------------
 
 

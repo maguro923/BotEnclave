@@ -8,10 +8,13 @@ the helper protocol; this module adds typing and error handling on top.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -113,6 +116,23 @@ class HelperClient:
     def capture_state(self, bot: str) -> bool:
         result = self._call({"op": "capture_state", "bot": bot})
         return bool(result["enabled"])
+
+    def open_console_stream(
+        self, bot: str, cols: int, rows: int
+    ) -> ConsoleStream | None:
+        """Spawn the helper's streaming console for this bot, or None
+        when the transport cannot stream (in-process fakes)."""
+        prefix = getattr(self._transport, "argv_prefix", None)
+        if not isinstance(prefix, list) or not prefix:
+            return None
+        env = getattr(self._transport, "stream_env", None)
+        proc = subprocess.Popen(
+            [*prefix, "--console-stream", bot, str(cols), str(rows)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env if isinstance(env, dict) else None,
+        )
+        return ConsoleStream(proc)
 
     def console_snapshot(self, bot: str) -> str:
         result = self._call({"op": "console_snapshot", "bot": bot})
@@ -219,6 +239,66 @@ class HelperClient:
         )
 
 
+class ConsoleStream:
+    """A live console byte stream to one bot's pane, through the
+    helper's streaming mode. Frames from the helper arrive on a queue:
+    {"type": "data", "data": <base64>} and a final {"type": "exit"}."""
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self._proc = proc
+        self.frames: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._send_lock = threading.Lock()
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+    def _pump(self) -> None:
+        try:
+            stdout = self._proc.stdout
+            if stdout is not None:
+                for line in stdout:
+                    try:
+                        frame = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(frame, dict):
+                        self.frames.put(frame)
+        except (OSError, ValueError):
+            pass
+        self.frames.put({"type": "exit"})
+
+    def _send(self, frame: dict[str, Any]) -> None:
+        stdin = self._proc.stdin
+        if stdin is None:
+            return
+        with self._send_lock:
+            try:
+                stdin.write(json.dumps(frame).encode() + b"\n")
+                stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+
+    def send_data(self, data: bytes) -> None:
+        import base64
+
+        self._send(
+            {"type": "data", "data": base64.b64encode(data).decode()}
+        )
+
+    def send_resize(self, cols: int, rows: int) -> None:
+        self._send({"type": "resize", "cols": cols, "rows": rows})
+
+    def close(self) -> None:
+        self._send({"type": "close"})
+        stdin = self._proc.stdin
+        if stdin is not None:
+            with contextlib.suppress(OSError):
+                stdin.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self._proc.wait(timeout=3)
+        if self._proc.poll() is None:
+            self._proc.terminate()
+
+
 def subprocess_transport(
     command: list[str], root: Path, package_dir: Path | None = None
 ) -> Transport:
@@ -247,6 +327,14 @@ def subprocess_transport(
             raise HelperError("internal", "helper response is not an object")
         return parsed
 
+    # The streaming console mode spawns the same helper entry point
+    # with extra argv; in-process fake transports have no entry point
+    # and report None, and the caller falls back to snapshot polling.
+    transport.argv_prefix = list(command)  # type: ignore[attr-defined]
+    stream_env = {**os.environ, "BOTENCLAVE_ROOT": str(root)}
+    if package_dir is not None:
+        stream_env["BOTENCLAVE_PACKAGE_DIR"] = str(package_dir)
+    transport.stream_env = stream_env  # type: ignore[attr-defined]
     return transport
 
 

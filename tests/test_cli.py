@@ -72,6 +72,18 @@ def test_main_access_prints_effective_policy(
     assert "loopback" in out.lower()
 
 
+def test_bot_runtime_defaults_to_helper_and_sticks(tmp_path: Path) -> None:
+    from botmgr.cli import resolve_bot_runtime
+
+    assert resolve_bot_runtime(tmp_path, None) == "helper"
+    assert resolve_bot_runtime(tmp_path, "systemd") == "systemd"
+    # A later start without the flag reuses the recorded mode, so a
+    # restart can never silently switch how bots are started.
+    assert resolve_bot_runtime(tmp_path, None) == "systemd"
+    assert resolve_bot_runtime(tmp_path, "helper") == "helper"
+    assert resolve_bot_runtime(tmp_path, None) == "helper"
+
+
 def test_main_setup_token_command(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

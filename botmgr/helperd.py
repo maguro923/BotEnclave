@@ -796,9 +796,19 @@ class SystemExecutor:
         fifo = data_dir / f".launch-{os.urandom(6).hex()}.fifo"
         os.mkfifo(fifo, 0o600)
         package_parent = str(self.package_dir.parent)
-        pane_command = (
-            f"PYTHONPATH={package_parent} exec /usr/bin/python3"
-            f" -m botmgr.launcher {fifo}"
+        # The pane command runs through /bin/sh (tmux default-shell):
+        # build it with shlex.join so every path is quoted as a single
+        # word — an install path containing spaces or shell characters
+        # must neither break the start nor inject into the pane shell.
+        pane_command = "exec " + shlex.join(
+            [
+                "env",
+                f"PYTHONPATH={package_parent}",
+                "/usr/bin/python3",
+                "-m",
+                "botmgr.launcher",
+                str(fifo),
+            ]
         )
         try:
             _run(["chown", f"{user}:{user}", str(fifo)])
@@ -1132,7 +1142,7 @@ def _still_ours(snapshot: dict[int, int]) -> set[int]:
     }
 
 
-def main(argv: list[str]) -> int:
+def _build_executor() -> SystemExecutor:
     root = Path(os.environ.get("BOTENCLAVE_ROOT", str(DEFAULT_ROOT)))
     package_dir_env = os.environ.get("BOTENCLAVE_PACKAGE_DIR")
     package_dir = Path(package_dir_env) if package_dir_env else None
@@ -1144,12 +1154,149 @@ def main(argv: list[str]) -> int:
             manager_group = grp.getgrgid(os.getegid()).gr_name
         except KeyError:
             manager_group = None
-    helper = Helper(
-        root=root,
-        executor=SystemExecutor(
-            root, manager_group=manager_group, package_dir=package_dir
-        ),
+    return SystemExecutor(
+        root, manager_group=manager_group, package_dir=package_dir
     )
+
+
+def _set_winsize(fd: int, cols: int, rows: int) -> None:
+    import fcntl
+    import struct
+    import termios
+
+    fcntl.ioctl(
+        fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)
+    )
+
+
+def run_console_stream(
+    executor: SystemExecutor, bot: str, cols: int, rows: int
+) -> int:
+    """Streaming console mode: attach a tmux client to the bot's pane on
+    a fresh PTY (as the bot user) and pump raw terminal bytes between
+    that PTY and this process's stdio, framed as newline-delimited JSON
+    ({\"type\": \"data\", \"data\": <base64>} / {\"type\": \"resize\", ...}
+    in, data / {\"type\": \"exit\"} out). This is the one helper mode that
+    is not a single request/response: it lives exactly as long as the
+    operator's console session, like the terminal proxy behind a
+    hypervisor's web console."""
+    import base64
+    import pty
+    import select
+
+    bot = validate_bot_name(bot)
+    cols = min(max(cols, 1), 500)
+    rows = min(max(rows, 1), 200)
+    user = username_for(bot)
+    inner = shlex.join(
+        [
+            "env",
+            "TERM=xterm-256color",
+            "tmux",
+            "-u",
+            "-L",
+            socket_name_for(bot),
+            "-f",
+            str(executor.package_dir / "tmux.conf"),
+            "attach-session",
+            "-t",
+            "main",
+        ]
+    )
+    master, slave = pty.openpty()
+    _set_winsize(master, cols, rows)
+    proc = subprocess.Popen(
+        ["su", "-s", "/bin/sh", user, "-c", inner],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        start_new_session=True,
+        close_fds=True,
+    )
+    os.close(slave)
+    stdout = sys.stdout.buffer
+
+    def emit(frame: dict[str, object]) -> None:
+        stdout.write(json.dumps(frame).encode() + b"\n")
+        stdout.flush()
+
+    try:
+        pending = b""
+        while True:
+            ready, _, _ = select.select([0, master], [], [], 0.5)
+            if master in ready:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break
+                emit(
+                    {
+                        "type": "data",
+                        "data": base64.b64encode(chunk).decode(),
+                    }
+                )
+            if 0 in ready:
+                block = os.read(0, 65536)
+                if not block:
+                    break
+                pending += block
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        frame = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(frame, dict):
+                        continue
+                    kind = frame.get("type")
+                    if kind == "data":
+                        data = frame.get("data")
+                        if isinstance(data, str):
+                            try:
+                                os.write(
+                                    master, base64.b64decode(data)
+                                )
+                            except (ValueError, OSError):
+                                pass
+                    elif kind == "resize":
+                        c, r = frame.get("cols"), frame.get("rows")
+                        if isinstance(c, int) and isinstance(r, int):
+                            _set_winsize(
+                                master,
+                                min(max(c, 1), 500),
+                                min(max(r, 1), 200),
+                            )
+                    elif kind == "close":
+                        return 0
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(master)
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGHUP)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=3)
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(Exception):
+        emit({"type": "exit"})
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) == 5 and argv[1] == "--console-stream":
+        try:
+            cols, rows = int(argv[3]), int(argv[4])
+            return run_console_stream(_build_executor(), argv[2], cols, rows)
+        except Exception:  # noqa: BLE001 - no JSON channel in stream mode
+            return 2
+    root = Path(os.environ.get("BOTENCLAVE_ROOT", str(DEFAULT_ROOT)))
+    helper = Helper(root=root, executor=_build_executor())
     raw = sys.stdin.read()
     try:
         request = json.loads(raw)

@@ -118,3 +118,16 @@ def test_read_tail_window_drops_the_partial_first_line(tmp_path: Path) -> None:
     lines = read_tail(log, 3)
     assert lines[-1] == "last-line"
     assert all(set(line) == {"x"} for line in lines[:-1])
+
+
+def test_read_tail_newline_free_file_over_window(tmp_path: Path) -> None:
+    """Regression (CI failure 2026-11-27): a log flooded with one
+    newline-free stream larger than the read window returned no lines
+    at all, because the window's only fragment was dropped as a
+    partial first line."""
+    log = tmp_path / "flood.log"
+    log.write_bytes(b"x" * (2 * 1024 * 1024))
+    lines = read_tail(log, 3)
+    assert len(lines) == 1
+    assert lines[0].endswith(" [truncated]")
+    assert set(lines[0][:100]) == {"x"}

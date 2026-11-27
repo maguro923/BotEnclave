@@ -115,6 +115,36 @@ def test_start_and_wait_attaches_capture_and_exits_with_pane(
     assert str(tmp_path / "bots" / bot / "logs" / "console.log") in fake.calls[1][-1]
 
 
+def test_pane_command_quotes_paths_with_spaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pane command runs through /bin/sh: paths must reach it as
+    single quoted words even when the install path contains spaces."""
+    import shlex
+
+    bot = "demo"
+    package_dir = tmp_path / "pkg dir" / "botmgr"
+    _write_launch(
+        tmp_path,
+        bot,
+        {"command": ["python3", "bot.py"], "cwd": str(tmp_path)},
+    )
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    fake = FakeTmux()
+    monkeypatch.setattr(botunit, "_tmux", fake)
+    monkeypatch.setattr(botunit, "_pane_state", lambda *a: "dead")
+    assert botunit.start_and_wait(tmp_path, bot, package_dir) == 0
+    command = fake.calls[0][-1]
+    assert command.startswith("exec ")
+    argv = shlex.split(command)
+    assert argv[0] == "exec"
+    assert argv[1] == "env"
+    assert argv[2] == f"PYTHONPATH={package_dir.parent}"
+    assert argv[3] == "/usr/bin/python3"
+    assert argv[4:7] == ["-m", "botmgr.launcher", "--files"]
+    assert argv[7] == str(tmp_path / "bots" / bot / "launch.json")
+
+
 def test_stop_kills_the_tmux_server(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeTmux()
     monkeypatch.setattr(botunit, "_tmux", fake)

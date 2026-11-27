@@ -33,6 +33,11 @@
      (<span id="server-tz">{{ timezone }}</span>)</p>
   <p class="muted">{{ t('settings.ntp') }} <span id="ntp-status">—</span></p>
 </div>
+<div class="card">
+  <h2>{{ t('settings.runtime') }}</h2>
+  <p>{{ t('settings.runtime_mode') }} <strong>{{ bot_runtime }}</strong></p>
+  <p class="muted">{{ t('settings.runtime_note') }}</p>
+</div>
 <script>
 const appearanceRadios = document.querySelectorAll('input[name="appearance"]');
 appearanceRadios.forEach((radio) => {

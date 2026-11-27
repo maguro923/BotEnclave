@@ -119,9 +119,12 @@ def read_tail(path: Path, max_lines: int) -> list[str]:
     except OSError:
         return []
     parts = data.split(b"\n")
-    if seeked and parts:
+    if seeked and len(parts) > 1:
         # The window starts mid-line (possibly mid-character); that
         # first fragment is not a real line and would decode garbled.
+        # (With no newline in the window at all, the single fragment
+        # IS the file's last line — a newline-free flood — and is
+        # returned, capped by decode_line.)
         parts = parts[1:]
     if parts and parts[-1] == b"":
         parts.pop()

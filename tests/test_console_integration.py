@@ -63,6 +63,53 @@ def log_size(helper: Helper) -> int:
     return path.stat().st_size if path.exists() else 0
 
 
+def test_console_stream_round_trip(helper: Helper) -> None:
+    """The streaming console (helper --console-stream over a PTY attach)
+    delivers the pane's output as raw bytes and carries input back,
+    like a hypervisor web console."""
+    import base64
+    import queue as queue_module
+
+    from botmgr.helper import direct_transport
+
+    helper.handle({"op": "create_user", "bot": BOT})
+    identity = start(helper, "console_echo.py")
+    try:
+        staging = helper.root / "staging"
+        os.environ["PYTHONPATH"] = str(staging)
+        try:
+            client = HelperClient(
+                direct_transport(helper.root, staging / "botmgr")
+            )
+            stream = client.open_console_stream(BOT, 80, 24)
+        finally:
+            del os.environ["PYTHONPATH"]
+        assert stream is not None
+        received = b""
+
+        def drain_until(marker: bytes, timeout: float = 15.0) -> bytes:
+            nonlocal received
+            deadline = time.monotonic() + timeout
+            while marker not in received and time.monotonic() < deadline:
+                try:
+                    frame = stream.frames.get(timeout=0.5)
+                except queue_module.Empty:
+                    continue
+                if frame.get("type") == "data":
+                    received += base64.b64decode(str(frame["data"]))
+            return received
+
+        try:
+            assert b"ready" in drain_until(b"ready")
+            stream.send_data(b"hello-stream\n")
+            assert b"echo: hello-stream" in drain_until(b"echo: hello-stream")
+            stream.send_resize(120, 40)
+        finally:
+            stream.close()
+    finally:
+        stop(helper, identity)
+
+
 def test_capture_writes_console_log(helper: Helper) -> None:
     helper.handle({"op": "create_user", "bot": BOT})
     identity = start(helper, "flooder.py")

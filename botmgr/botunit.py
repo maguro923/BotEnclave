@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -88,12 +89,20 @@ def start_and_wait(root: Path, bot: str, package_dir: Path) -> int:
         tmp.chmod(0o600)
         os.replace(tmp, dotenv)
     package_parent = str(package_dir.parent)
-    shim = (
-        f"PYTHONPATH={package_parent} exec /usr/bin/python3"
-        f" -m botmgr.launcher --files {launch_json}"
-    )
+    # Same construction as the helper path: shlex.join quotes every
+    # path as a single word for the pane's /bin/sh.
+    shim_argv = [
+        "env",
+        f"PYTHONPATH={package_parent}",
+        "/usr/bin/python3",
+        "-m",
+        "botmgr.launcher",
+        "--files",
+        str(launch_json),
+    ]
     if env_file is not None:
-        shim += f" {env_file}"
+        shim_argv.append(str(env_file))
+    shim = "exec " + shlex.join(shim_argv)
     proc = _tmux(
         package_dir,
         bot,

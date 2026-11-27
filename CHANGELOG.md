@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Changed: the interactive console is now a raw terminal stream
+  (the helper attaches a tmux client to the bot's pane on a PTY and
+  pumps bytes both ways, like a hypervisor web console) instead of
+  4-per-second screen snapshots. Scrollback, control keys, paste
+  and resize behave like a real terminal. Snapshot polling remains
+  as a fallback for transports that cannot stream.
+- Fixed: the bot runtime mode (`--bot-runtime`) is now recorded in
+  the store and reused on later starts, so restarting the manager
+  can no longer silently switch how bots are started (helper vs
+  per-bot systemd units). The settings page shows the active mode.
+- Fixed: the pane launcher command is built with full shell quoting
+  in both start paths; install paths containing spaces or shell
+  characters previously broke the pane shell command (and were an
+  injection surface into it).
 - Fixed: the console log view no longer force-scrolls to the bottom
   on every new line; it follows the tail only while the reader is
   already at the bottom, so earlier output stays readable.

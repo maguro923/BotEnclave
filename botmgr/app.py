@@ -495,6 +495,7 @@ def create_app(config: AppConfig) -> FastAPI:
                 "user": admin,
                 "timezone": configured_tz_name(store.get_setting("timezone")),
                 "timezones": sorted(zoneinfo.available_timezones()),
+                "bot_runtime": config.bot_runtime,
             }),
         )
 
@@ -1507,19 +1508,7 @@ def create_app(config: AppConfig) -> FastAPI:
         audit.record(user.email, "console.connect", bot)
         await run_in_threadpool(capture.acquire_private, bot)
         try:
-            snapshot = await run_in_threadpool(client.console_snapshot, bot)
-            await websocket.send_text(json.dumps({"type": "screen", "data": snapshot}))
-            sender = asyncio.create_task(_console_sender(websocket, client, bot))
-            try:
-                while True:
-                    message = await websocket.receive_text()
-                    await _handle_console_message(message, client, bot)
-            except WebSocketDisconnect:
-                pass
-            finally:
-                sender.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await sender
+            await _serve_console(websocket, client, bot)
         finally:
             # Cleanup must survive client-disconnect cancellation: shield
             # each step so one cancelled await cannot skip the next step.
@@ -1606,6 +1595,135 @@ async def _tls_rotation_loop(root: Path, audit: AuditLog) -> None:
             logger.info("tls: restarting to apply the renewed certificate")
             os.kill(os.getpid(), signal.SIGTERM)
             return
+
+
+async def _serve_console(
+    websocket: WebSocket, client: HelperClient, bot: str
+) -> None:
+    """Console session: prefer the helper's raw byte stream (a real
+    terminal feed, like a hypervisor console); fall back to snapshot
+    polling when the transport cannot stream."""
+    # The browser sends its terminal size first; use it for the PTY so
+    # the first frame is already drawn at the right size.
+    cols, rows = 80, 24
+    first: dict[str, Any] | None = None
+    try:
+        first = await asyncio.wait_for(
+            websocket.receive(), timeout=2.0  # type: ignore[arg-type]
+        )
+    except TimeoutError:
+        first = None
+    if first is not None and first.get("type") == "websocket.disconnect":
+        return
+    if first is not None and isinstance(first.get("text"), str):
+        size = _console_resize(first["text"])
+        if size is not None:
+            cols, rows = size
+            first = None
+    stream = await run_in_threadpool(client.open_console_stream, bot, cols, rows)
+    if stream is None:
+        await _serve_console_snapshots(websocket, client, bot, first)
+        return
+    try:
+        if first is not None:
+            await _forward_console_input(first, client, bot, stream)
+        await _pump_console(websocket, stream)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await run_in_threadpool(stream.close)
+
+
+def _console_resize(message: str) -> tuple[int, int] | None:
+    try:
+        payload = json.loads(message)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "resize":
+        return None
+    cols, rows = payload.get("cols"), payload.get("rows")
+    if isinstance(cols, int) and isinstance(rows, int):
+        return cols, rows
+    return None
+
+
+async def _forward_console_input(
+    message: dict[str, Any],
+    client: HelperClient,
+    bot: str,
+    stream: Any,
+) -> None:
+    data = message.get("bytes")
+    if isinstance(data, bytes) and data:
+        await run_in_threadpool(stream.send_data, data)
+        return
+    text = message.get("text")
+    if isinstance(text, str):
+        size = _console_resize(text)
+        if size is not None:
+            await run_in_threadpool(stream.send_resize, size[0], size[1])
+
+
+async def _pump_console(websocket: WebSocket, stream: Any) -> None:
+    import base64
+
+    async def send_frames() -> None:
+        while True:
+            frame = await run_in_threadpool(stream.frames.get)
+            if not isinstance(frame, dict) or frame.get("type") == "exit":
+                return
+            if frame.get("type") == "data":
+                data = frame.get("data")
+                if isinstance(data, str):
+                    try:
+                        await websocket.send_bytes(base64.b64decode(data))
+                    except ValueError:
+                        continue
+
+    sender = asyncio.create_task(send_frames())
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if isinstance(data, bytes) and data:
+                await run_in_threadpool(stream.send_data, data)
+                continue
+            text = message.get("text")
+            if isinstance(text, str):
+                size = _console_resize(text)
+                if size is not None:
+                    await run_in_threadpool(
+                        stream.send_resize, size[0], size[1]
+                    )
+    finally:
+        sender.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sender
+
+
+async def _serve_console_snapshots(
+    websocket: WebSocket,
+    client: HelperClient,
+    bot: str,
+    first: dict[str, Any] | None,
+) -> None:
+    snapshot = await run_in_threadpool(client.console_snapshot, bot)
+    await websocket.send_text(json.dumps({"type": "screen", "data": snapshot}))
+    sender = asyncio.create_task(_console_sender(websocket, client, bot))
+    try:
+        if first is not None and isinstance(first.get("text"), str):
+            await _handle_console_message(first["text"], client, bot)
+        while True:
+            message = await websocket.receive_text()
+            await _handle_console_message(message, client, bot)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        sender.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sender
 
 
 async def _console_sender(websocket: WebSocket, client: HelperClient, bot: str) -> None:

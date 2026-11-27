@@ -754,18 +754,34 @@ term.loadAddon(fit);
 term.open(document.getElementById('terminal'));
 fit.fit();
 const consoleWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/console');
+consoleWs.binaryType = 'arraybuffer';
+// Streaming mode (the usual path): the server forwards the pane's
+// raw byte stream, so the terminal behaves like a hypervisor web
+// console — real scrollback, no snapshot redraws. If the server
+// falls back to screen snapshots, it says so with a 'screen' frame
+// and input switches to the legacy JSON form.
+let consoleStreaming = true;
 consoleWs.onopen = () => {
   consoleWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
 };
 consoleWs.onmessage = (event) => {
+  if (event.data instanceof ArrayBuffer) {
+    term.write(new Uint8Array(event.data));
+    return;
+  }
   const msg = JSON.parse(event.data);
   if (msg.type === 'screen') {
+    consoleStreaming = false;
     term.reset();
     term.write(msg.data.replace(/\n/g, '\r\n'));
   }
 };
 term.onData((data) => {
-  consoleWs.send(JSON.stringify({ type: 'input', data }));
+  if (consoleStreaming) {
+    consoleWs.send(new TextEncoder().encode(data));
+  } else {
+    consoleWs.send(JSON.stringify({ type: 'input', data }));
+  }
 });
 term.onResize(({ cols, rows }) => {
   consoleWs.send(JSON.stringify({ type: 'resize', cols, rows }));

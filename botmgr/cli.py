@@ -57,6 +57,24 @@ def build_runtime(root: Path, package_dir: Path | None = None) -> Runtime:
     return Runtime(store, client, supervisor, capture, watchdog, report)
 
 
+def resolve_bot_runtime(root: Path, requested: str | None) -> str:
+    """The bot runtime mode decides how every bot is started (via the
+    helper, or via per-bot systemd units), so it must not silently
+    depend on how the serve process happened to be launched: an
+    explicitly requested mode is recorded in the store, and later
+    starts reuse the recorded mode until it is changed the same way."""
+    from botmgr.store import StateStore
+
+    settings = StateStore(root / "botmgr.db")
+    try:
+        if requested is not None:
+            settings.set_setting("bot_runtime", requested)
+            return requested
+        return settings.get_setting("bot_runtime") or "helper"
+    finally:
+        settings.close()
+
+
 def _web_secret(root: Path) -> str:
     env = os.environ.get("BOTENCLAVE_SECRET")
     if env:
@@ -260,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--transport", choices=("direct", "sudo"), default="direct")
     p.add_argument("--no-cookie-secure", action="store_true")
     p.add_argument(
-        "--bot-runtime", choices=("helper", "systemd"), default="helper"
+        "--bot-runtime", choices=("helper", "systemd"), default=None
     )
     sub.add_parser("access")
     p = sub.add_parser("unlock")
@@ -413,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
             host,
             args.port,
         )
+        bot_runtime = resolve_bot_runtime(args.root, args.bot_runtime)
+        logger.info("serve: bot runtime mode is %s", bot_runtime)
         app = create_app(
             AppConfig(
                 root=args.root,
@@ -420,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
                 cookie_secure=not args.no_cookie_secure,
                 transport=args.transport,
                 package_dir=args.package_dir,
-                bot_runtime=args.bot_runtime,
+                bot_runtime=bot_runtime,
                 access=access,
             )
         )
