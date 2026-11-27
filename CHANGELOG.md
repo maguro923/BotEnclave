@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed: the console log view no longer force-scrolls to the bottom
+  on every new line; it follows the tail only while the reader is
+  already at the bottom, so earlier output stays readable.
+- Fixed: the package install/remove output can now be dismissed
+  with a clear button; previously a long pip log stayed on the page
+  until the next package operation.
 - Added: a bot with no release yet can now start a panel edit
   session from an empty staging area, so its first release can be
   written by hand (for example a minimal `main.py`) instead of

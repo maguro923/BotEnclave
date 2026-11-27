@@ -180,6 +180,7 @@
     <span id="pkg-result"></span>
   </form>
   <pre id="pkg-output" class="muted" style="white-space: pre-wrap;" hidden></pre>
+  <p><button type="button" class="secondary" id="pkg-clear" hidden>{{ t('bot.log_clear') }}</button></p>
   <p>{{ t('bot.installed') }}</p>
   <p id="pkg-installed" class="muted"></p>
 </div>
@@ -688,7 +689,12 @@ function setPackageResult(kind, text, output) {
   const out = $('pkg-output');
   if (output) { out.hidden = false; out.textContent = output; }
   else { out.hidden = true; out.textContent = ''; }
+  // The pip output stays until the next operation or until dismissed;
+  // without a way to clear it, a long install log sits on the page
+  // for the rest of the session.
+  $('pkg-clear').hidden = !(text || output);
 }
+$('pkg-clear').onclick = () => setPackageResult('muted', '', '');
 $('pkg-form').onsubmit = async (e) => {
   e.preventDefault();
   const spec = $('pkg-spec').value.trim();
@@ -726,11 +732,15 @@ document.getElementById('log-clear').onclick = () => { logEl.textContent = ''; }
 const logWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/log');
 logWs.onmessage = (event) => {
   const { lines } = JSON.parse(event.data);
+  // Follow the tail only while the reader is at the bottom: scrolling
+  // up to read earlier output must not be yanked back down every time
+  // a new line arrives.
+  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   for (const line of lines) {
     logEl.appendChild(document.createTextNode(line + '\n'));
   }
   while (logEl.childNodes.length > 2000) logEl.removeChild(logEl.firstChild);
-  logEl.scrollTop = logEl.scrollHeight;
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
 };
 const term = new Terminal({
   convertEol: false,

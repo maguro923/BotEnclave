@@ -1232,6 +1232,9 @@ def test_bot_page_wires_command_card_and_status_polling(
     assert "pollStatus" in page and "meta-disk" in page
     assert "log-clear" in page
     assert "rp-select" in page and "autostart-toggle" in page
+    # The log view must not force-scroll a reader who scrolled up, and
+    # the package install output must be dismissable.
+    assert "atBottom" in page and "pkg-clear" in page
 
 
 def test_bot_page_wires_editor_edit_session_and_packages(
