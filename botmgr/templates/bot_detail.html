@@ -6,6 +6,7 @@
 {% endblock %}
 {% block content %}
 <h1>{{ bot }} <span class="badge {{ state }}" id="state-badge">{{ state }}</span></h1>
+<p class="meta-line">{% if uptime_text %}{{ t('bot.uptime') }} {{ uptime_text }} &middot; {% endif %}{% if release_id %}{{ t('bot.release') }} {{ release_id }} &middot; {% endif %}{{ t('bot.disk') }} {{ disk_text }}</p>
 <p>
   <button id="start-btn">{{ t('bot.start') }}</button>
   <button class="secondary" id="stop-btn">{{ t('bot.stop') }}</button>
@@ -13,6 +14,14 @@
   <span id="action-result" class="warn"></span>
 </p>
 
+<div class="tabs">
+  <button type="button" data-tab="deploy" class="active">{{ t('bot.deploy') }}</button>
+  <button type="button" data-tab="console">{{ t('bot.console') }}</button>
+  <button type="button" data-tab="files">{{ t('bot.files') }}</button>
+  <button type="button" data-tab="env">{{ t('bot.env') }}</button>
+</div>
+
+<div data-panel="deploy">
 <div class="card">
   <h2>{{ t('bot.deploy') }}</h2>
   <form id="git-form">
@@ -32,7 +41,53 @@
   <p><button class="secondary" id="rollback-btn">{{ t('bot.rollback') }}</button></p>
   <pre class="log" id="deploy-log" style="height: 160px;" hidden></pre>
 </div>
+</div>
 
+<div data-panel="console" hidden>
+<div class="card">
+  <h2>{{ t('bot.console') }}</h2>
+  <p class="notice">{{ t('bot.console_notice') }}</p>
+  <div id="terminal"></div>
+</div>
+
+<div class="card">
+  <h2>{{ t('bot.log') }}</h2>
+  <pre class="log" id="log"></pre>
+</div>
+</div>
+
+<div data-panel="files" hidden>
+<div class="card">
+  <h2>{{ t('bot.files') }}</h2>
+  <p>
+    {{ t('bot.zone') }}
+    <select id="file-zone">
+      <option value="data">{{ t('bot.zone_data') }}</option>
+      <option value="logs">{{ t('bot.zone_logs') }}</option>
+      <option value="releases">{{ t('bot.zone_releases') }}</option>
+    </select>
+    {{ t('bot.path') }} <span id="file-path"></span>
+    <button class="secondary" id="file-up">{{ t('bot.up') }}</button>
+    <button class="secondary" id="file-newdir">{{ t('bot.new_folder') }}</button>
+    <button class="secondary" id="file-newfile">{{ t('bot.new_file') }}</button>
+  </p>
+  <table>
+    <thead><tr><th>{{ t('bot.name_col') }}</th><th>{{ t('bot.kind') }}</th><th>{{ t('bot.size') }}</th><th></th></tr></thead>
+    <tbody id="file-rows"></tbody>
+  </table>
+  <div id="file-editor" hidden>
+    <p>{{ t('bot.editing') }} <code id="editor-path"></code></p>
+    <textarea id="editor-text" rows="14" style="width: 100%;"></textarea>
+    <p>
+      <button id="editor-save">{{ t('bot.save') }}</button>
+      <button class="secondary" id="editor-close">{{ t('bot.close') }}</button>
+      <span id="editor-result" class="warn"></span>
+    </p>
+  </div>
+</div>
+</div>
+
+<div data-panel="env" hidden>
 <div class="card">
   <h2>{{ t('bot.env') }}</h2>
   <p class="muted">{{ t('bot.env_note') }} <strong id="env-backend-label"></strong></p>
@@ -62,45 +117,6 @@
   <p id="webhook-secret" style="word-break: break-all;"></p>
   <p class="muted">{{ t('bot.webhook_note').replace('{bot}', bot)|safe }}</p>
 </div>
-
-<div class="card">
-  <h2>{{ t('bot.files') }}</h2>
-  <p>
-    {{ t('bot.zone') }}
-    <select id="file-zone">
-      <option value="data">{{ t('bot.zone_data') }}</option>
-      <option value="logs">{{ t('bot.zone_logs') }}</option>
-      <option value="releases">{{ t('bot.zone_releases') }}</option>
-    </select>
-    {{ t('bot.path') }} <span id="file-path"></span>
-    <button class="secondary" id="file-up">{{ t('bot.up') }}</button>
-    <button class="secondary" id="file-newdir">{{ t('bot.new_folder') }}</button>
-    <button class="secondary" id="file-newfile">{{ t('bot.new_file') }}</button>
-  </p>
-  <table>
-    <thead><tr><th>{{ t('bot.name_col') }}</th><th>{{ t('bot.kind') }}</th><th>{{ t('bot.size') }}</th><th></th></tr></thead>
-    <tbody id="file-rows"></tbody>
-  </table>
-  <div id="file-editor" hidden>
-    <p>{{ t('bot.editing') }} <code id="editor-path"></code></p>
-    <textarea id="editor-text" rows="14" style="width: 100%;"></textarea>
-    <p>
-      <button id="editor-save">{{ t('bot.save') }}</button>
-      <button class="secondary" id="editor-close">{{ t('bot.close') }}</button>
-      <span id="editor-result" class="warn"></span>
-    </p>
-  </div>
-</div>
-
-<div class="card">
-  <h2>{{ t('bot.console') }}</h2>
-  <p class="notice">{{ t('bot.console_notice') }}</p>
-  <div id="terminal"></div>
-</div>
-
-<div class="card">
-  <h2>{{ t('bot.log') }}</h2>
-  <pre class="log" id="log"></pre>
 </div>
 
 <script>
@@ -371,5 +387,16 @@ term.onResize(({ cols, rows }) => {
   consoleWs.send(JSON.stringify({ type: 'resize', cols, rows }));
 });
 window.addEventListener('resize', () => fit.fit());
+
+// -- tabs ----------------------------------------------------------------------
+document.querySelectorAll('.tabs button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('[data-panel]').forEach((panel) => {
+      panel.hidden = panel.getAttribute('data-panel') !== btn.dataset.tab;
+    });
+    if (btn.dataset.tab === 'console') fit.fit();
+  });
+});
 </script>
 {% endblock %}

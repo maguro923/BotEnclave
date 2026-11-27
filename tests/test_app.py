@@ -20,6 +20,7 @@ from starlette.websockets import WebSocketDisconnect
 from botmgr import fileops
 from botmgr.app import AppConfig, assert_bot_routes_guarded, create_app
 from botmgr.procident import current_boot_id
+from botmgr.store import StateStore
 
 ADMIN = ("admin@example.com", "admin-password-1")
 GUEST_A = "a@example.com"
@@ -758,3 +759,24 @@ def test_login_and_setup_pages_show_brand_and_light_default(
         assert page.status_code == 200
         assert "BotEnclave" in page.text
         assert 'data-theme="light"' in page.text
+
+
+def test_deploys_page_requires_login_and_lists_releases(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    assert client.get("/deploys", follow_redirects=False).status_code == 401
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    store = StateStore(root / "botmgr.db")
+    store.record_release("alpha", "20261127T010203-abcd", "zip upload")
+    store.set_active_release("alpha", "20261127T010203-abcd")
+    page = admin.get("/deploys")
+    assert page.status_code == 200, page.text
+    assert "alpha" in page.text
+    assert "20261127T010203-abcd" in page.text
+    detail = admin.get("/bots/alpha")
+    assert detail.status_code == 200, detail.text
+    # The bot page's compact meta line names the active release.
+    assert "meta-line" in detail.text
+    assert "20261127T010203-abcd" in detail.text

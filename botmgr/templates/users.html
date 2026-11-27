@@ -10,6 +10,7 @@
   </form>
   <p class="muted">{{ t('users.invite_note') }}</p>
 </div>
+<div class="card">
 <table>
   <thead><tr><th>{{ t('users.email') }}</th><th>{{ t('users.username') }}</th><th>{{ t('users.role') }}</th><th>{{ t('users.active') }}</th><th>{{ t('users.2fa') }}</th><th></th></tr></thead>
   <tbody>
@@ -33,6 +34,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 <p id="action-result" class="warn"></p>
 <script>
 const result = document.getElementById('action-result');

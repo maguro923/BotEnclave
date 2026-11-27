@@ -25,6 +25,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -47,6 +48,7 @@ from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
+from botmgr import procident
 from botmgr.access import AccessConfig, AccessMiddleware
 from botmgr.audit import AuditLog, AuditMirror
 from botmgr.auth.deps import AuthBundle, build_auth, init_auth_db
@@ -119,6 +121,26 @@ def visible_bots(user: User, bots: list[StoredBot]) -> list[StoredBot]:
     if user.is_superuser:
         return bots
     return [b for b in bots if b.owner_id == user.id]
+
+
+def _format_duration(seconds: float) -> str:
+    total = int(seconds)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {rem // 60}m"
+    return f"{rem // 60}m"
+
+
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
 
 
 def assert_bot_routes_guarded(
@@ -397,13 +419,23 @@ def create_app(config: AppConfig) -> FastAPI:
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
     ) -> HTMLResponse:
+        state = supervisor.state(stored.bot_id)
+        active = store.active_release(stored.bot_id)
+        uptime_text: str | None = None
+        if state.value == "running" and stored.identity is not None:
+            ago = procident.started_seconds_ago(stored.identity)
+            if ago is not None:
+                uptime_text = _format_duration(ago)
         return templates.TemplateResponse(
             request,
             "bot_detail.html",
             page_context({
                 "user": user,
                 "bot": stored.bot_id,
-                "state": supervisor.state(stored.bot_id).value,
+                "state": state.value,
+                "release_id": active.release_id if active else None,
+                "disk_text": _format_bytes(usage.get(stored.bot_id, 0)),
+                "uptime_text": uptime_text,
             }),
         )
 
@@ -1011,6 +1043,30 @@ def create_app(config: AppConfig) -> FastAPI:
         entries = visible_audit(user)[-200:][::-1]
         return templates.TemplateResponse(
             request, "audit.html", page_context({"user": user, "entries": entries})
+        )
+
+    @app.get("/deploys", response_class=HTMLResponse)
+    async def deploys_page(
+        request: Request, user: User = Depends(current_user)  # type: ignore[arg-type]
+    ) -> HTMLResponse:
+        dated: list[tuple[float, dict[str, object]]] = []
+        for bot in visible_bots(user, store.load_all()):
+            for record in store.list_releases(bot.bot_id):
+                dated.append((record.created_at, {
+                    "bot": bot.bot_id,
+                    "release_id": record.release_id,
+                    "source_ref": record.source_ref,
+                    "created": datetime.fromtimestamp(record.created_at).strftime(
+                        "%Y-%m-%d %H:%M"
+                    ),
+                    "active": record.active,
+                }))
+        dated.sort(key=lambda item: item[0], reverse=True)
+        rows = [row for _ts, row in dated[:100]]
+        return templates.TemplateResponse(
+            request,
+            "deploys.html",
+            page_context({"user": user, "rows": rows}),
         )
 
     # -- admin: user deletion with bot transfer --------------------------------

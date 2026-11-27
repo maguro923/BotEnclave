@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ t('deploys.title') }}</h1>
+<div class="card">
+{% if rows %}
+<table>
+  <thead><tr><th>{{ t('deploys.bot') }}</th><th>{{ t('bot.release') }}</th><th>{{ t('bot.source') }}</th><th>{{ t('deploys.created') }}</th><th>{{ t('bot.active_col') }}</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><a href="/bots/{{ r.bot }}">{{ r.bot }}</a></td>
+      <td>{{ r.release_id }}</td>
+      <td>{{ r.source_ref }}</td>
+      <td>{{ r.created }}</td>
+      <td>{% if r.active %}<span class="badge running">{{ t('bot.yes') }}</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">{{ t('deploys.none') }}</p>
+{% endif %}
+</div>
+{% endblock %}

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Changed: the panel UI was redesigned around a sidebar layout
+  (soft slate sidebar in both themes, light by default with a dark
+  option). The bot page groups its sections into tabs (Deploy,
+  Console, Files, Environment) and shows uptime, the active release
+  and disk usage as one compact line under the bot name. The
+  settings page is reduced to language and appearance. A new
+  Deploys page lists releases across all visible bots.
+- Fixed: starting a bot that exits immediately (a crasher, a
+  one-shot script) could fail with "pane process vanished during
+  start": the helper read the pane's process identity after
+  unblocking the launcher, racing the bot's exit and tmux reaping
+  the pane. The identity is now captured while the launcher is
+  still blocked on its launch FIFO (the identity survives the exec
+  into the bot), so instant-exit bots start reliably.
 - Fixed: restoring a backup did not restore the OS-side layout.
   Restored files were owned by whoever ran the restore with default
   permissions (a bot's `data/` came back world-readable instead of

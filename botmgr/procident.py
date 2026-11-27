@@ -9,6 +9,7 @@ matches, and re-verified immediately before sending (PLAN section 1.3).
 from __future__ import annotations
 
 import dataclasses
+import os
 from pathlib import Path
 
 _PROC = Path("/proc")
@@ -24,6 +25,24 @@ class ProcessIdentity:
 
 def current_boot_id() -> str:
     return _BOOT_ID_PATH.read_text(encoding="ascii").strip()
+
+
+def started_seconds_ago(identity: ProcessIdentity) -> float | None:
+    """Wall-clock seconds since the identity's process started.
+
+    Derived from the boot-relative start tick and the current system
+    uptime, so it stays correct across manager restarts. None when the
+    identity belongs to another boot or the values are unavailable.
+    """
+    if identity.boot_id != current_boot_id():
+        return None
+    try:
+        uptime = float((_PROC / "uptime").read_text(encoding="ascii").split()[0])
+        hz = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        return None
+    ago = uptime - identity.start_time / hz
+    return ago if ago >= 0 else None
 
 
 def _read_start_time(pid: int) -> int | None:

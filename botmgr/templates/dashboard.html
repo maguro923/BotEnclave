@@ -14,6 +14,7 @@
   </form>
   <p class="muted">{{ t('dash.add_note') }}</p>
 </div>
+<div class="card">
 <table>
   <thead><tr><th>{{ t('dash.name') }}</th><th>{{ t('dash.state') }}</th><th></th></tr></thead>
   <tbody id="bot-rows">
@@ -30,6 +31,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 <script>
 document.getElementById('create-form').addEventListener('submit', async (e) => {
   e.preventDefault();

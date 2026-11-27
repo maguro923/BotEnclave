@@ -3,6 +3,7 @@
 <h1>{{ t('audit.title') }}</h1>
 <p class="muted">{% if user.is_superuser %}{{ t('audit.note_admin') }}{% else %}{{ t('audit.note_guest') }}{% endif %}
 {{ t('audit.note_tail') }}</p>
+<div class="card">
 <table>
   <thead><tr><th>{{ t('audit.time') }}</th><th>{{ t('audit.actor') }}</th><th>{{ t('audit.action') }}</th><th>{{ t('audit.target') }}</th><th>{{ t('audit.detail') }}</th></tr></thead>
   <tbody>
@@ -17,4 +18,5 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}
