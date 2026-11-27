@@ -254,6 +254,20 @@ def build_auth_router(
     async def temp_password(
         user_id: int, admin: User = Depends(current_admin)  # type: ignore[arg-type]
     ) -> dict[str, object]:
+        target = await service.get_user(user_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="no such user")
+        if target.is_superuser:
+            # A panel admin must not be able to take over a peer
+            # admin's account. Admin recovery belongs to the host's
+            # trust root: the terminal (`botmgr reset-password`).
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "temporary passwords for admin accounts are issued"
+                    " from the terminal: botmgr reset-password <email>"
+                ),
+            )
         try:
             password = await service.issue_temp_password(user_id)
         except TempPasswordRateLimited:

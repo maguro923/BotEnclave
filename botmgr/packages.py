@@ -41,6 +41,18 @@ def validate_spec(spec: str) -> str:
     return cleaned
 
 
+def split_specs(text: str) -> list[str]:
+    """Split a batch entry into individual specs.
+
+    Separators are whitespace and commas (ASCII or fullwidth), so
+    "requests, discord.py>=2 numpy" is three specs. A single spec
+    never contains those characters (validate_spec rejects them), so
+    splitting first and validating each part is unambiguous.
+    """
+    parts = re.split(r"[\s,、，]+", text.strip())
+    return [part for part in parts if part]
+
+
 def package_name(spec: str) -> str:
     match = _SPEC_RE.match(spec.strip())
     if match is None:

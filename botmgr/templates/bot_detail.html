@@ -25,7 +25,7 @@
 {% endblock %}
 {% block content %}
 <h1>{{ bot }} <span class="badge {{ state }}" id="state-badge">{{ state }}</span></h1>
-<p class="meta-line">{% if uptime_text %}{{ t('bot.uptime') }} {{ uptime_text }} &middot; {% endif %}{% if release_id %}{{ t('bot.release') }} {{ release_id }} &middot; {% endif %}{{ t('bot.disk') }} {{ disk_text }}</p>
+<p class="meta-line"><span id="meta-uptime">{% if uptime_text %}{{ t('bot.uptime') }} {{ uptime_text }} &middot; {% endif %}</span><span id="meta-release">{% if release_id %}{{ t('bot.release') }} {{ release_id }} &middot; {% endif %}</span>{{ t('bot.disk') }} <span id="meta-disk">{{ disk_text }}</span></p>
 <p>
   <button id="start-btn">{{ t('bot.start') }}</button>
   <button class="secondary" id="stop-btn">{{ t('bot.stop') }}</button>
@@ -60,6 +60,17 @@
   <p><button class="secondary" id="rollback-btn">{{ t('bot.rollback') }}</button></p>
   <pre class="log" id="deploy-log" style="height: 160px;" hidden></pre>
 </div>
+<div class="card">
+  <h2>{{ t('bot.cmd_title') }}</h2>
+  <p>{{ t('bot.cmd_current') }} <code id="cmd-current"></code> <span id="cmd-kind" class="badge"></span></p>
+  <p>
+    <input type="text" id="cmd-input" style="width: 70%;" spellcheck="false">
+    <button type="button" id="cmd-save">{{ t('bot.cmd_save') }}</button>
+    <button type="button" class="secondary" id="cmd-reset">{{ t('bot.cmd_reset') }}</button>
+    <span id="cmd-result"></span>
+  </p>
+  <p class="muted">{{ t('bot.cmd_note') }}</p>
+</div>
 </div>
 
 <div data-panel="console" hidden>
@@ -70,7 +81,7 @@
 </div>
 
 <div class="card">
-  <h2>{{ t('bot.log') }}</h2>
+  <h2>{{ t('bot.log') }} <button type="button" class="secondary" id="log-clear">{{ t('bot.log_clear') }}</button></h2>
   <pre class="log" id="log"></pre>
 </div>
 </div>
@@ -254,6 +265,49 @@ $('rollback-btn').onclick = async () => {
   loadReleases();
 };
 loadReleases();
+
+// -- launch command ------------------------------------------------------------
+function renderCommand(data) {
+  $('cmd-current').textContent = data.effective.join(' ');
+  $('cmd-kind').textContent = data.override ? window.t('bot.cmd_custom') : window.t('bot.cmd_default');
+  $('cmd-input').value = data.effective.join(' ');
+}
+async function loadCommand() {
+  const resp = await fetch('/api/bots/' + botId + '/command');
+  if (resp.ok) renderCommand(await resp.json());
+}
+$('cmd-save').onclick = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/command', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: $('cmd-input').value }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (resp.ok) { renderCommand(data); showResult($('cmd-result'), window.t('bot.cmd_saved')); }
+  else showResult($('cmd-result'), window.t('bot.failed').replace('{detail}', data.detail || resp.status));
+};
+$('cmd-reset').onclick = async () => {
+  const resp = await apiFetch('/api/bots/' + botId + '/command', { method: 'DELETE' });
+  const data = await resp.json().catch(() => ({}));
+  if (resp.ok) { renderCommand(data); showResult($('cmd-result'), window.t('bot.cmd_saved')); }
+  else showResult($('cmd-result'), window.t('bot.failed').replace('{detail}', data.detail || resp.status));
+};
+loadCommand();
+
+// -- live status: state, uptime and disk, refreshed every second ----------------
+async function pollStatus() {
+  const resp = await fetch('/api/bots/' + botId + '/status').catch(() => null);
+  if (!resp || !resp.ok) return;
+  const data = await resp.json();
+  const badge = $('state-badge');
+  badge.textContent = data.state;
+  badge.className = 'badge ' + data.state;
+  $('meta-uptime').textContent = data.uptime_text
+    ? window.t('bot.uptime') + ' ' + data.uptime_text + ' · ' : '';
+  $('meta-release').textContent = data.release_id
+    ? window.t('bot.release') + ' ' + data.release_id + ' · ' : '';
+  $('meta-disk').textContent = data.disk_text;
+}
+setInterval(pollStatus, 1000);
 
 // -- environment -------------------------------------------------------------
 async function loadEnv() {
@@ -619,6 +673,9 @@ loadPackages();
 // -- console + log ---------------------------------------------------------------
 const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
 const logEl = document.getElementById('log');
+// Display-only clear: the log file itself is untouched, and lines
+// written afterwards keep arriving as usual.
+document.getElementById('log-clear').onclick = () => { logEl.textContent = ''; };
 const logWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/log');
 logWs.onmessage = (event) => {
   const { lines } = JSON.parse(event.data);

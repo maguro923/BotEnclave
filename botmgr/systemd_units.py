@@ -89,9 +89,11 @@ Type=simple
 User={manager_user}
 WorkingDirectory={root}
 Environment=PYTHONPATH={package_dir.parent}
+Environment=LANG=C.UTF-8
 ExecStart=/usr/bin/python3 -m botmgr.cli --root {root} serve --host {host} --port {port} --transport sudo
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
 MemoryMax=1G
 OOMScoreAdjust=-500
 
@@ -126,6 +128,7 @@ User=bm-{bot}
 Group=bm-{bot}
 WorkingDirectory={root}/bots/{bot}/data
 Environment=PYTHONPATH={package_dir.parent}
+Environment=LANG=C.UTF-8
 {credential_line}ExecStart=/usr/bin/python3 -m botmgr.botunit --root {root} --bot {bot} --package-dir {package_dir}
 ExecStop=/usr/bin/python3 -m botmgr.botunit --root {root} --bot {bot} --package-dir {package_dir} --stop
 MemoryMax={memory_max}

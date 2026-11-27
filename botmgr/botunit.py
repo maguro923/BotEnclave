@@ -33,6 +33,7 @@ def _tmux(package_dir: Path, bot: str, *args: str) -> subprocess.CompletedProces
     return subprocess.run(
         [
             "tmux",
+            "-u",  # force UTF-8 regardless of locale (see helperd._tmux)
             "-L",
             socket_name_for(bot),
             "-f",
@@ -41,6 +42,8 @@ def _tmux(package_dir: Path, bot: str, *args: str) -> subprocess.CompletedProces
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
     )

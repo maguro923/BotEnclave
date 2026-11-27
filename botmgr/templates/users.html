@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>{{ t('users.title') }}</h1>
+<p class="muted">{{ t('users.temp_admin_note') }}</p>
 <div class="card">
   <h2>{{ t('users.invite') }}</h2>
   <form id="invite-form">
@@ -22,7 +23,9 @@
       <td>{{ t('users.yes') if u.is_active else t('users.no') }}</td>
       <td>{{ t('users.on') if u.totp_enabled else t('users.off') }}</td>
       <td>
+        {% if not u.is_superuser %}
         <button class="secondary" data-temp="{{ u.id }}">{{ t('users.temp_pw') }}</button>
+        {% endif %}
         {% if u.is_active %}
         <button class="secondary" data-disable="{{ u.id }}">{{ t('users.disable') }}</button>
         {% else %}

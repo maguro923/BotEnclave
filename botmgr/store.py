@@ -70,6 +70,7 @@ _BOT_COLUMN_MIGRATIONS = {
     "git_url_enc": "TEXT",
     "git_branch": "TEXT",
     "dotenv_mode": "INTEGER NOT NULL DEFAULT 0",
+    "command_override": "TEXT",
 }
 
 
@@ -84,6 +85,7 @@ class StoredBot:
     source_type: str | None = None
     git_branch: str | None = None
     dotenv_mode: bool = False
+    command_override: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,17 +150,20 @@ class StateStore:
             # settings that a REPLACE would silently reset to defaults.
             row = self._conn.execute(
                 "SELECT owner_id, secret_backend, source_type, git_url_enc,"
-                " git_branch, dotenv_mode FROM bots WHERE bot_id = ?",
+                " git_branch, dotenv_mode, command_override"
+                " FROM bots WHERE bot_id = ?",
                 (bot_id,),
             ).fetchone()
             if owner_id is None:
                 owner_id = row[0] if row else None
-            preserved = row[1:] if row else ("fernet", None, None, None, 0)
+            preserved = (
+                row[1:] if row else ("fernet", None, None, None, 0, None)
+            )
             self._conn.execute(
                 "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at,"
                 " owner_id, secret_backend, source_type, git_url_enc,"
-                " git_branch, dotenv_mode)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " git_branch, dotenv_mode, command_override)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     bot_id,
                     config_to_json(config),
@@ -198,7 +203,7 @@ class StateStore:
             rows = self._conn.execute(
                 "SELECT b.bot_id, b.launch_json, s.state, s.pid, s.start_time,"
                 " s.boot_id, b.owner_id, b.secret_backend, b.source_type,"
-                " b.git_branch, b.dotenv_mode FROM bots b"
+                " b.git_branch, b.dotenv_mode, b.command_override FROM bots b"
                 " LEFT JOIN bot_state s ON s.bot_id = b.bot_id ORDER BY b.bot_id"
             ).fetchall()
         result: list[StoredBot] = []
@@ -215,6 +220,7 @@ class StateStore:
                 source_type,
                 git_branch,
                 dotenv_mode,
+                command_override_json,
             ) = row
             identity = None
             if pid is not None and start_time is not None and boot_id is not None:
@@ -232,9 +238,32 @@ class StateStore:
                     source_type=source_type,
                     git_branch=git_branch,
                     dotenv_mode=bool(dotenv_mode),
+                    command_override=(
+                        tuple(json.loads(command_override_json))
+                        if command_override_json
+                        else None
+                    ),
                 )
             )
         return result
+
+    def set_command_override(
+        self, bot_id: str, command: list[str] | None
+    ) -> None:
+        """Pin (or clear) the launch command a bot always starts with.
+
+        Deployments honor the override instead of the release default,
+        so a customized start command survives updates and rollbacks.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET command_override = ? WHERE bot_id = ?",
+                (
+                    json.dumps(command) if command is not None else None,
+                    bot_id,
+                ),
+            )
+            self._conn.commit()
 
     def set_owner(self, bot_id: str, owner_id: int | None) -> None:
         with self._lock:

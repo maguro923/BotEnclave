@@ -97,3 +97,20 @@ def test_list_installed_reads_pip_list(tmp_path: Path) -> None:
     names = {entry["name"].lower() for entry in installed}
     assert "pip" in names
     assert all(entry["version"] for entry in installed)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("requests", ["requests"]),
+        ("requests, discord.py>=2.3", ["requests", "discord.py>=2.3"]),
+        ("requests discord.py", ["requests", "discord.py"]),
+        ("requests、numpy， scipy", ["requests", "numpy", "scipy"]),
+        ("  requests ,, flask  ", ["requests", "flask"]),
+        ("", []),
+    ],
+)
+def test_split_specs(text: str, expected: list[str]) -> None:
+    assert packages.split_specs(text) == expected
+    for part in expected:
+        assert packages.validate_spec(part) == part

@@ -108,9 +108,11 @@ token; WebSockets check `Origin`.
 on FastAPI Users with database-backed opaque session tokens (so an
 admin can revoke sessions), Argon2id hashing, invite-only account
 creation, admin-issued temporary passwords with forced change and an
-issue rate limit, login lockout (5 failures → 15 minutes, released by
-an admin or `botmgr unlock`), and TOTP with replay protection plus
-single-use hashed backup codes.
+issue rate limit (never for admin accounts — a panel admin must not
+take over a peer admin; admin recovery is the terminal's
+`botmgr reset-password`), login lockout (5 failures → 15 minutes,
+released by an admin or `botmgr unlock`), and TOTP with replay
+protection plus single-use hashed backup codes.
 
 **Secrets.** Per bot, one of three backends (see the README table).
 Invariants: values are injected per bot, only at start, through the

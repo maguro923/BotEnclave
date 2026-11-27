@@ -937,6 +937,179 @@ def test_packages_endpoints_record_extras(
     assert store.list_packages("alpha") == []
 
 
+def test_packages_install_accepts_a_batch(
+    env: tuple[TestClient, FakeHelper, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from botmgr import packages
+
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    store = StateStore(root / "botmgr.db")
+    store.record_release("alpha", "20261127T010203-ab12", "zip upload")
+    store.set_active_release("alpha", "20261127T010203-ab12")
+    installed: list[str] = []
+
+    def fake_install(venv: Path, spec: str) -> tuple[bool, str]:
+        installed.append(spec)
+        return (spec != "broken-pkg", f"installed {spec}")
+
+    monkeypatch.setattr(packages, "install", fake_install)
+    resp = admin.post(
+        "/api/bots/alpha/packages",
+        json={"spec": "requests>=2, numpy discord.py"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["specs"] == ["requests>=2", "numpy", "discord.py"]
+    assert store.list_packages("alpha") == [
+        "requests>=2",
+        "numpy",
+        "discord.py",
+    ]
+
+    invalid = admin.post(
+        "/api/bots/alpha/packages", json={"spec": "flask, bad;spec"}
+    )
+    assert invalid.status_code == 400
+    assert "flask" not in store.list_packages("alpha")
+
+    partial = admin.post(
+        "/api/bots/alpha/packages", json={"spec": "flask, broken-pkg"}
+    )
+    assert partial.status_code == 400
+    assert "broken-pkg" in partial.json()["detail"]
+    # The successful part of the batch stays installed and recorded.
+    assert "flask" in store.list_packages("alpha")
+    assert "broken-pkg" not in store.list_packages("alpha")
+
+
+def test_command_override_endpoints(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    store = StateStore(root / "botmgr.db")
+    release_id = "20261127T010203-ab12"
+    release_dir = root / "bots" / "alpha" / "releases" / release_id
+    release_dir.mkdir(parents=True)
+    (release_dir / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    store.record_release("alpha", release_id, "zip upload")
+    store.set_active_release("alpha", release_id)
+
+    info = admin.get("/api/bots/alpha/command")
+    assert info.status_code == 200, info.text
+    assert info.json()["override"] is None
+    assert info.json()["default"][-1].endswith("current/main.py")
+    assert info.json()["effective"] == info.json()["default"]
+
+    saved = admin.put(
+        "/api/bots/alpha/command",
+        json={"command": 'python3 main.py --name "my bot"'},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["effective"] == [
+        "python3",
+        "main.py",
+        "--name",
+        "my bot",
+    ]
+    stored = store.get_bot("alpha")
+    assert stored is not None
+    assert stored.command_override == ("python3", "main.py", "--name", "my bot")
+    assert stored.config.command == ("python3", "main.py", "--name", "my bot")
+
+    bad = admin.put(
+        "/api/bots/alpha/command", json={"command": 'python3 "unclosed'}
+    )
+    assert bad.status_code == 400
+    empty = admin.put("/api/bots/alpha/command", json={"command": "  "})
+    assert empty.status_code == 400
+
+    reset = admin.request("DELETE", "/api/bots/alpha/command")
+    assert reset.status_code == 200, reset.text
+    assert reset.json()["override"] is None
+    assert reset.json()["effective"] == reset.json()["default"]
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.command_override is None
+
+
+def test_status_endpoint_reports_live_fields(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    resp = admin.get("/api/bots/alpha/status")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["state"] == "stopped"
+    assert data["uptime_text"] is None
+    assert data["disk_bytes"] >= 0
+    assert data["disk_text"]
+    assert data["release_id"] is None
+
+
+def test_settings_timezone_and_audit_time_format(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    import re
+
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    saved = admin.post("/api/settings", json={"timezone": "Asia/Tokyo"})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["timezone"] == "Asia/Tokyo"
+    bad = admin.post("/api/settings", json={"timezone": "Nowhere/Special"})
+    assert bad.status_code == 400
+
+    entries = admin.get("/api/audit").json()
+    stamp = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+    assert entries and stamp.match(entries[-1]["time"])
+
+    info = admin.get("/api/time")
+    assert info.status_code == 200, info.text
+    assert info.json()["timezone"] == "Asia/Tokyo"
+    assert stamp.match(info.json()["time"])
+    assert "ntp" in info.json()
+
+
+def test_temp_password_refused_for_admin_accounts(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    users = admin.get("/admin/users").json()
+    admin_id = next(u["id"] for u in users if u["is_superuser"])
+    invited = admin.post(
+        "/admin/users/invite",
+        json={"email": "guest2@example.com", "is_admin": False},
+    )
+    assert invited.status_code == 200, invited.text
+    guest_id = invited.json()["id"]
+
+    refused = admin.post(f"/admin/users/{admin_id}/temp-password")
+    assert refused.status_code == 403
+    assert "reset-password" in refused.json()["detail"]
+
+    issued = admin.post(f"/admin/users/{guest_id}/temp-password")
+    assert issued.status_code == 200, issued.text
+    assert issued.json()["temp_password"]
+
+
+def test_bot_page_wires_command_card_and_status_polling(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    page = admin.get("/bots/alpha").text
+    assert "cmd-input" in page and "cmd-save" in page and "cmd-reset" in page
+    assert "pollStatus" in page and "meta-disk" in page
+    assert "log-clear" in page
+
+
 def test_bot_page_wires_editor_edit_session_and_packages(
     env: tuple[TestClient, FakeHelper, Path],
 ) -> None:

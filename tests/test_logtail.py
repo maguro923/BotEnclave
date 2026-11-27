@@ -102,3 +102,19 @@ def test_rotate_shifts_generations(tmp_path: Path) -> None:
     assert (tmp_path / "console.log.1").read_text() == "current"
     assert (tmp_path / "console.log.2").read_text() == "gen1"
     assert (tmp_path / "console.log.3").read_text() == "gen2"
+
+
+def test_truncated_line_does_not_end_in_replacement_char() -> None:
+    raw = "←".encode() * (MAX_LINE_BYTES // 3 + 10)
+    decoded = decode_line(raw)
+    assert "\ufffd" not in decoded
+    assert decoded.endswith(" [truncated]")
+
+
+def test_read_tail_window_drops_the_partial_first_line(tmp_path: Path) -> None:
+    log = tmp_path / "big.log"
+    filler = ("x" * 100 + "\n") * 12000  # > 1 MiB window
+    log.write_text(filler + "last-line\n", encoding="utf-8")
+    lines = read_tail(log, 3)
+    assert lines[-1] == "last-line"
+    assert all(set(line) == {"x"} for line in lines[:-1])

@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- Fixed: non-ASCII text (arrows such as ←, Japanese, …) could reach
+  the console log garbled on systems whose locale is not UTF-8: tmux
+  is now always started with `-u` (forced UTF-8), the manager and bot
+  units set LANG=C.UTF-8, helper output is decoded as UTF-8
+  explicitly, and the log reader no longer surfaces a dangling
+  replacement character when a line or the tail window is cut in the
+  middle of a multi-byte character.
+- Changed: package installation accepts several specs at once,
+  separated by commas or spaces; all are validated before anything is
+  installed, then installed and recorded one by one.
+- Added: a "Clear view" button on the bot log. It clears only the
+  display — the log file itself is untouched, and new lines keep
+  arriving.
+- Fixed: `systemctl stop botenclave` appeared to hang. Graceful
+  shutdown waited indefinitely for the panel's open WebSockets; the
+  server now force-closes connections after 5 seconds and the unit
+  declares TimeoutStopSec=20 (re-run scripts/install.sh or
+  `botmgr systemd install` to pick up the new unit).
+- Added: per-bot launch command override. The bot page's Deploy tab
+  shows the effective command and lets you pin a custom one (kept
+  across deploys and rollbacks, applied from the next start) or reset
+  to the release default.
+- Changed: the bot page's state, uptime and disk usage now refresh
+  every second (state and uptime are exact; disk usage is measured at
+  most every 5 seconds).
+- Added: a global timezone setting (default: the system timezone).
+  Every displayed timestamp — audit log, deploy history, and the rest
+  — is formatted in that zone as yyyy-mm-dd hh:mm:ss. The settings
+  page shows the live server clock and the NTP synchronization state
+  (the clock itself stays disciplined by systemd-timesyncd; the panel
+  reports, never adjusts).
+- Changed: temporary passwords are no longer issued for admin
+  accounts from the panel, so a panel admin cannot take over a peer
+  admin's account. Admin password recovery moves to the terminal:
+  `botmgr reset-password <email>` (forced change and session
+  revocation apply as before).
 - Removed: bot deletion's keep-files option (the API's `purge_files`
   parameter and the CLI's `--purge-files` flag). Deleting a bot now
   always removes its registration and its whole file tree together;

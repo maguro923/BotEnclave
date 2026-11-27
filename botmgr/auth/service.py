@@ -225,6 +225,15 @@ class AuthService:
             return True
 
     # -- passwords -------------------------------------------------------------
+    async def reset_password_by_email(self, email: str) -> str | None:
+        """Terminal-side recovery (`botmgr reset-password`): the host
+        administrator is the trust root, so this path also covers
+        admin accounts, which the panel route refuses."""
+        user = await self.get_by_email(email)
+        if user is None:
+            return None
+        return await self.issue_temp_password(user.id)
+
     async def issue_temp_password(self, user_id: int) -> str:
         temp_password = secrets.token_urlsafe(12)
         async with self._bundle.session_factory() as session:

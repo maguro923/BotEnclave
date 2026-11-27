@@ -535,6 +535,11 @@ class SystemExecutor:
         command = shlex.join(
             [
                 "tmux",
+                # -u forces UTF-8 mode regardless of the (often unset)
+                # locale under systemd; without it, older tmux builds
+                # replace non-ASCII output (arrows, Japanese, …) in
+                # panes, which then lands garbled in the console log.
+                "-u",
                 "-L",
                 socket_name_for(bot),
                 "-f",
@@ -546,10 +551,11 @@ class SystemExecutor:
         # tmux daemonizes its server, which keeps inherited pipe FDs open;
         # capturing through pipes would block until the server exits.
         # Temporary files have no EOF semantics, so the call returns as soon
-        # as the tmux client itself is done.
+        # as the tmux client itself is done. They are read back as UTF-8
+        # explicitly: the locale here is not guaranteed to be one.
         with (
-            tempfile.TemporaryFile(mode="w+") as out,
-            tempfile.TemporaryFile(mode="w+") as err,
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out,
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err,
         ):
             proc = subprocess.run(
                 argv,

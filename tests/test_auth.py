@@ -285,6 +285,25 @@ def test_temp_password_rate_limit(app_and_service) -> None:  # type: ignore[no-u
         _asyncio.run(service.issue_temp_password(user_id))
 
 
+def test_reset_password_by_email_covers_admins(  # type: ignore[no-untyped-def]
+    app_and_service,
+) -> None:
+    """The terminal recovery path works for admin accounts too (the
+    panel route refuses those), and reports unknown emails as None."""
+    import asyncio as _asyncio
+
+    app, service = app_and_service
+    admin_client(app)  # creates the first admin via setup
+    password = _asyncio.run(service.reset_password_by_email(ADMIN_EMAIL))
+    assert password
+    user = _asyncio.run(service.get_by_email(ADMIN_EMAIL))
+    assert user is not None and user.must_change_password
+    assert (
+        _asyncio.run(service.reset_password_by_email("nobody@example.com"))
+        is None
+    )
+
+
 def test_concurrent_setup_creates_exactly_one_admin(
     app_and_service: tuple[FastAPI, AuthService],
 ) -> None:

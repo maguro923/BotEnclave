@@ -21,11 +21,12 @@ import json
 import logging
 import os
 import secrets as stdlib_secrets
+import shlex
 import signal
 import threading
 import time
+import zoneinfo
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -75,6 +76,12 @@ from botmgr.reconcile import reconcile
 from botmgr.secrets import decrypt_text, encrypt_text, load_or_create_fernet
 from botmgr.store import StateStore, StoredBot
 from botmgr.supervisor import BusyError, SecretPendingError, Supervisor
+from botmgr.timeutil import (
+    configured_tz,
+    configured_tz_name,
+    format_ts,
+    ntp_status,
+)
 from botmgr.watchdog import Watchdog
 from botmgr.webhooks import WebhookSecrets
 
@@ -254,12 +261,21 @@ def create_app(config: AppConfig) -> FastAPI:
             return []
         return list(resolution.env.values())
 
+    def fmt_ts(epoch: float) -> str:
+        """Every displayed timestamp: configured zone, one format."""
+        return format_ts(epoch, configured_tz(store.get_setting("timezone")))
+
     def visible_audit(user: User) -> list[dict[str, object]]:
         entries = audit.read_all()
-        if user.is_superuser:
-            return entries
-        own = {b.bot_id for b in store.load_all() if b.owner_id == user.id}
-        return [e for e in entries if e.get("target") in own]
+        if not user.is_superuser:
+            own = {b.bot_id for b in store.load_all() if b.owner_id == user.id}
+            entries = [e for e in entries if e.get("target") in own]
+        formatted: list[dict[str, object]] = []
+        for entry in entries:
+            ts_raw = entry.get("ts")
+            ts = float(ts_raw) if isinstance(ts_raw, int | float) else 0.0
+            formatted.append({**entry, "time": fmt_ts(ts)})
+        return formatted
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
@@ -461,7 +477,13 @@ def create_app(config: AppConfig) -> FastAPI:
         request: Request, admin: User = Depends(bundle.current_admin)  # type: ignore[arg-type]
     ) -> HTMLResponse:
         return templates.TemplateResponse(
-            request, "settings.html", page_context({"user": admin})
+            request,
+            "settings.html",
+            page_context({
+                "user": admin,
+                "timezone": configured_tz_name(store.get_setting("timezone")),
+                "timezones": sorted(zoneinfo.available_timezones()),
+            }),
         )
 
     @app.post("/api/settings")
@@ -469,11 +491,45 @@ def create_app(config: AppConfig) -> FastAPI:
         body: dict[str, Any], admin: User = Depends(bundle.current_admin)  # type: ignore[arg-type]
     ) -> dict[str, str]:
         language = body.get("language")
-        if language not in STRINGS:
-            raise HTTPException(status_code=400, detail="unsupported language")
-        store.set_setting("language", str(language))
-        audit.record(admin.email, "settings.language", "", str(language))
-        return {"status": "ok", "language": str(language)}
+        timezone = body.get("timezone")
+        if language is None and timezone is None:
+            raise HTTPException(
+                status_code=400, detail="nothing to update"
+            )
+        if language is not None:
+            if language not in STRINGS:
+                raise HTTPException(
+                    status_code=400, detail="unsupported language"
+                )
+            store.set_setting("language", str(language))
+            audit.record(admin.email, "settings.language", "", str(language))
+        if timezone is not None:
+            name = str(timezone)
+            try:
+                zoneinfo.ZoneInfo(name)
+            except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+                raise HTTPException(
+                    status_code=400, detail="unknown timezone"
+                ) from None
+            store.set_setting("timezone", name)
+            audit.record(admin.email, "settings.timezone", "", name)
+        return {
+            "status": "ok",
+            "language": store.get_setting("language") or "en",
+            "timezone": configured_tz_name(store.get_setting("timezone")),
+        }
+
+    @app.get("/api/time")
+    async def time_info(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+    ) -> dict[str, object]:
+        now = time.time()
+        return {
+            "time": fmt_ts(now),
+            "epoch": now,
+            "timezone": configured_tz_name(store.get_setting("timezone")),
+            "ntp": await run_in_threadpool(ntp_status),
+        }
 
     # -- bot API ---------------------------------------------------------------
     @app.get("/api/bots")
@@ -888,19 +944,27 @@ def create_app(config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=403, detail=quota)
         bot = stored.bot_id
         try:
-            spec = packages.validate_spec(str(payload.get("spec", "")))
+            specs = [
+                packages.validate_spec(part)
+                for part in packages.split_specs(str(payload.get("spec", "")))
+            ]
         except packages.PackageError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        ok, output = await run_in_threadpool(
-            packages.install, _active_venv(bot), spec
-        )
-        if not ok:
-            raise HTTPException(
-                status_code=400, detail=output or "pip install failed"
-            )
-        store.add_package(bot, spec)
-        audit.record(user.email, "package.install", bot, spec)
-        return {"spec": spec, "output": output}
+        if not specs:
+            raise HTTPException(status_code=400, detail="no package specified")
+        venv = _active_venv(bot)
+        outputs: list[str] = []
+        for spec in specs:
+            ok, output = await run_in_threadpool(packages.install, venv, spec)
+            if not ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{spec}: {output or 'pip install failed'}",
+                )
+            store.add_package(bot, spec)
+            audit.record(user.email, "package.install", bot, spec)
+            outputs.append(output)
+        return {"specs": specs, "output": "\n".join(outputs)}
 
     @app.delete("/api/bots/{bot_id}/packages")
     async def packages_remove(
@@ -926,6 +990,83 @@ def create_app(config: AppConfig) -> FastAPI:
         store.remove_package(bot, spec)
         audit.record(user.email, "package.remove", bot, spec)
         return {"spec": spec, "output": output}
+
+    # -- launch command --------------------------------------------------------------
+    @app.get("/api/bots/{bot_id}/command")
+    async def command_get(
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        return deploy_service.command_info(stored.bot_id)
+
+    @app.put("/api/bots/{bot_id}/command")
+    async def command_put(
+        payload: dict[str, object],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        raw = str(payload.get("command", ""))
+        try:
+            parts = shlex.split(raw)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"cannot parse command: {exc}"
+            ) from None
+        if not parts or not parts[0].strip():
+            raise HTTPException(status_code=400, detail="command is empty")
+        store.set_command_override(bot, parts)
+        await run_in_threadpool(deploy_service.apply_command, bot)
+        audit.record(user.email, "bot.command", bot, shlex.join(parts))
+        return deploy_service.command_info(bot)
+
+    @app.delete("/api/bots/{bot_id}/command")
+    async def command_reset(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        store.set_command_override(bot, None)
+        await run_in_threadpool(deploy_service.apply_command, bot)
+        audit.record(user.email, "bot.command_reset", bot, "")
+        return deploy_service.command_info(bot)
+
+    # -- live status (polled every second by the bot page) ---------------------------
+    disk_cache: dict[str, tuple[float, int]] = {}
+
+    @app.get("/api/bots/{bot_id}/status")
+    async def bot_status(
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        state = supervisor.state(bot)
+        uptime_seconds: float | None = None
+        uptime_text: str | None = None
+        if state.value == "running" and stored.identity is not None:
+            uptime_seconds = procident.started_seconds_ago(stored.identity)
+            if uptime_seconds is not None:
+                uptime_text = _format_duration(uptime_seconds)
+        now = time.time()
+        cached = disk_cache.get(bot)
+        if cached is not None and now - cached[0] < 5.0:
+            disk_bytes = cached[1]
+        else:
+            try:
+                disk_bytes = await run_in_threadpool(client.disk_usage, bot)
+            except Exception:  # noqa: BLE001
+                # A failed measurement falls back to the cached value;
+                # the status endpoint must never fail over disk usage.
+                disk_bytes = usage.get(bot, 0)
+            disk_cache[bot] = (now, disk_bytes)
+            usage[bot] = disk_bytes
+        active = store.active_release(bot)
+        return {
+            "state": state.value,
+            "uptime_seconds": uptime_seconds,
+            "uptime_text": uptime_text,
+            "disk_bytes": disk_bytes,
+            "disk_text": _format_bytes(disk_bytes),
+            "release_id": active.release_id if active else None,
+        }
 
     # -- webhook secret ------------------------------------------------------------
     @app.get("/api/bots/{bot_id}/webhook")
@@ -1192,9 +1333,7 @@ def create_app(config: AppConfig) -> FastAPI:
                     "bot": bot.bot_id,
                     "release_id": record.release_id,
                     "source_ref": record.source_ref,
-                    "created": datetime.fromtimestamp(record.created_at).strftime(
-                        "%Y-%m-%d %H:%M"
-                    ),
+                    "created": fmt_ts(record.created_at),
                     "active": record.active,
                 }))
         dated.sort(key=lambda item: item[0], reverse=True)

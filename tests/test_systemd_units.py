@@ -34,6 +34,9 @@ def test_manager_unit_and_sudoers() -> None:
     unit = systemd_units.render_manager_unit(ROOT, "botenclave", PKG, port=9000)
     assert "User=botenclave" in unit
     assert "Restart=always" in unit
+    # A stop must be bounded: the panel holds WebSockets open, and an
+    # unbounded graceful shutdown made `systemctl stop` appear to hang.
+    assert "TimeoutStopSec=20" in unit
     assert "OOMScoreAdjust=-500" in unit
     assert "--transport sudo" in unit
     assert "--port 9000" in unit

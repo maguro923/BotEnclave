@@ -19,8 +19,11 @@ _READ_CHUNK = 64 * 1024
 
 def decode_line(raw: bytes) -> str:
     if len(raw) > MAX_LINE_BYTES:
+        # errors="ignore" on the cut slice only: a byte cap can land in
+        # the middle of a multi-byte character, and showing a dangling
+        # replacement character for it reads as mojibake.
         raw = raw[:MAX_LINE_BYTES]
-        return raw.decode("utf-8", errors="replace") + TRUNCATION_MARKER
+        return raw.decode("utf-8", errors="ignore") + TRUNCATION_MARKER
     return raw.decode("utf-8", errors="replace")
 
 
@@ -109,12 +112,17 @@ def read_tail(path: Path, max_lines: int) -> list[str]:
     try:
         size = path.stat().st_size
         with open(path, "rb") as fh:
-            if size > _READ_CHUNK * 16:
+            seeked = size > _READ_CHUNK * 16
+            if seeked:
                 fh.seek(size - _READ_CHUNK * 16)
             data = fh.read()
     except OSError:
         return []
     parts = data.split(b"\n")
+    if seeked and parts:
+        # The window starts mid-line (possibly mid-character); that
+        # first fragment is not a real line and would decode garbled.
+        parts = parts[1:]
     if parts and parts[-1] == b"":
         parts.pop()
     return [decode_line(part) for part in parts[-max_lines:]]

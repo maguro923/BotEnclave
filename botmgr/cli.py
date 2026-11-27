@@ -80,6 +80,15 @@ async def _unlock(root: Path, email: str) -> bool:
     return await AuthService(bundle).unlock(email)
 
 
+async def _reset_password(root: Path, email: str) -> str | None:
+    from botmgr.auth.deps import build_auth, init_auth_db
+    from botmgr.auth.service import AuthService
+
+    bundle = build_auth(root, _web_secret(root), cookie_secure=True)
+    await init_auth_db(bundle)
+    return await AuthService(bundle).reset_password_by_email(email)
+
+
 async def _setup_token(root: Path, regenerate: bool) -> str:
     from botmgr.auth.deps import build_auth, init_auth_db
     from botmgr.auth.routes import setup_token_path
@@ -256,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("access")
     p = sub.add_parser("unlock")
     p.add_argument("email")
+    p = sub.add_parser("reset-password")
+    p.add_argument("email")
     p = sub.add_parser("setup-token")
     p.add_argument("--regenerate", action="store_true")
 
@@ -420,6 +431,11 @@ def main(argv: list[str] | None = None) -> int:
             ssl_certfile=str(cert_path),
             ssl_keyfile=str(key_path),
             log_config=uvicorn_log_config(),
+            # Without a bound, graceful shutdown waits forever for
+            # open connections — and the panel always holds some
+            # (log/console/overview WebSockets), so `systemctl stop`
+            # appeared to hang until systemd's kill timeout.
+            timeout_graceful_shutdown=5,
         )
         return 0
     if args.command == "unlock":
@@ -428,6 +444,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(f"no such user: {args.email}", file=sys.stderr)
         return 1
+    if args.command == "reset-password":
+        from botmgr.auth.service import TempPasswordRateLimited
+
+        try:
+            password = asyncio.run(_reset_password(args.root, args.email))
+        except TempPasswordRateLimited:
+            print("temporary password issued too often", file=sys.stderr)
+            return 1
+        if password is None:
+            print(f"no such user: {args.email}", file=sys.stderr)
+            return 1
+        print(f"temporary password for {args.email}: {password}")
+        print("It must be changed at the next login.")
+        return 0
     if args.command == "setup-token":
         try:
             print(asyncio.run(_setup_token(args.root, args.regenerate)))

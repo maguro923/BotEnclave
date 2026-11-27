@@ -453,24 +453,82 @@ class DeployService:
         self._gc(bot)
         return DeployResult(release_id=release_id, entry=entry, state=state)
 
+    def _launch_config(
+        self, bot: str, release_id: str, entry: str
+    ) -> LaunchConfig:
+        """The config a release runs with: the bot's pinned command
+        override when one is set, else the release's venv python."""
+        bot_dir = self._bot_dir(bot)
+        stored = self._store.get_bot(bot)
+        override = stored.command_override if stored is not None else None
+        command = tuple(override) if override else (
+            str(bot_dir / "venvs" / release_id / "bin" / "python"),
+            str(bot_dir / "current" / entry),
+        )
+        data_dir = bot_dir / "data"
+        return LaunchConfig(
+            command=command,
+            cwd=str(data_dir),
+            env={"HOME": str(data_dir)},
+        )
+
+    def command_info(self, bot: str) -> dict[str, object]:
+        """Effective, pinned and default launch commands for the UI."""
+        stored = self._store.get_bot(bot)
+        override = stored.command_override if stored is not None else None
+        default: list[str] | None = None
+        active = self._store.active_release(bot)
+        if active is not None:
+            release_dir = self._bot_dir(bot) / "releases" / active.release_id
+            if release_dir.is_dir():
+                entry = detect_entry(release_dir)
+                bot_dir = self._bot_dir(bot)
+                default = [
+                    str(bot_dir / "venvs" / active.release_id / "bin" / "python"),
+                    str(bot_dir / "current" / entry),
+                ]
+        if override:
+            effective: list[str] = list(override)
+        elif default is not None:
+            effective = default
+        elif stored is not None:
+            effective = list(stored.config.command)
+        else:
+            effective = []
+        return {
+            "effective": effective,
+            "override": list(override) if override else None,
+            "default": default,
+        }
+
+    def apply_command(self, bot: str) -> None:
+        """Re-derive the stored launch config after an override change.
+
+        With an active release the config is rebuilt for it (override
+        or default). Without one there is nothing to re-derive: the
+        next deploy builds the config, honoring the override.
+        """
+        active = self._store.active_release(bot)
+        if active is None:
+            return
+        release_dir = self._bot_dir(bot) / "releases" / active.release_id
+        if not release_dir.is_dir():
+            return
+        entry = detect_entry(release_dir)
+        self._supervisor.set_config(
+            bot, self._launch_config(bot, active.release_id, entry)
+        )
+
     def _point_at(self, bot: str, release_id: str, entry: str) -> None:
         """Switch ``current``, the store's active record and the
         supervisor's launch config to a release (bot already stopped)."""
-        bot_dir = self._bot_dir(bot)
         # The bot folder is bot-owned and the manager may only
         # traverse it, so the symlink swap goes through the helper.
         self._client.point_current(bot, release_id)
         self._store.set_active_release(bot, release_id)
-        data_dir = bot_dir / "data"
-        config = LaunchConfig(
-            command=(
-                str(bot_dir / "venvs" / release_id / "bin" / "python"),
-                str(bot_dir / "current" / entry),
-            ),
-            cwd=str(data_dir),
-            env={"HOME": str(data_dir)},
+        self._supervisor.set_config(
+            bot, self._launch_config(bot, release_id, entry)
         )
-        self._supervisor.set_config(bot, config)
 
     def _activate(
         self, bot: str, release_id: str, entry: str, restart: bool
