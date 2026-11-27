@@ -107,7 +107,7 @@
     <tbody id="file-rows"></tbody>
   </table>
   <div id="file-editor" hidden>
-    <p>{{ t('bot.editing') }} <code id="editor-path"></code> <span id="editor-dirty" class="warn" hidden>● {{ t('bot.unsaved') }}</span></p>
+    <p>{{ t('bot.editing') }} <code id="editor-path"></code> <span id="editor-dirty" class="warn" hidden>● {{ t('bot.unsaved') }}</span> <button class="secondary" id="editor-close-top">{{ t('bot.close') }}</button></p>
     <textarea id="editor-text" rows="14" style="width: 100%;"></textarea>
     <p>
       <button id="editor-save">{{ t('bot.save') }}</button>
@@ -181,8 +181,7 @@ $('start-btn').onclick = async () => {
 $('stop-btn').onclick = () => apiFetch('/api/bots/' + botId + '/stop', { method: 'POST' });
 $('delete-btn').onclick = async () => {
   if (!confirm(window.t('bot.delete_confirm').replace('{name}', botId))) return;
-  const purge = confirm(window.t('bot.purge_confirm'));
-  await apiFetch('/api/bots/' + botId + (purge ? '?purge_files=true' : ''), { method: 'DELETE' });
+  await apiFetch('/api/bots/' + botId, { method: 'DELETE' });
   location.href = '/';
 };
 
@@ -330,7 +329,7 @@ async function loadFiles() {
       const a = document.createElement('a');
       a.href = '#';
       a.textContent = entry.name + '/';
-      a.onclick = (e) => { e.preventDefault(); filePath = filePath ? filePath + '/' + entry.name : entry.name; loadFiles(); };
+      a.onclick = (e) => { e.preventDefault(); if (!closeEditor()) return; filePath = filePath ? filePath + '/' + entry.name : entry.name; loadFiles(); };
       nameCell.appendChild(a);
     } else {
       nameCell.textContent = entry.name;
@@ -407,6 +406,13 @@ function setSaveStatus(kind, detail) {
   else if (kind === 'error') { el.className = 'error-text'; el.textContent = window.t('bot.save_failed').replace('{detail}', detail); }
   else { el.className = ''; el.textContent = ''; }
 }
+function closeEditor() {
+  if (editorDirty && !confirm(window.t('bot.unsaved_confirm'))) return false;
+  editorDirty = false;
+  $('editor-dirty').hidden = true;
+  $('file-editor').hidden = true;
+  return true;
+}
 async function openFile(name) {
   if (editorDirty && !confirm(window.t('bot.unsaved_confirm'))) return;
   const zone = $('file-zone').value;
@@ -443,14 +449,17 @@ async function saveFile() {
   return false;
 }
 $('editor-save').onclick = () => saveFile();
-$('editor-close').onclick = () => {
-  if (editorDirty && !confirm(window.t('bot.unsaved_confirm'))) return;
-  editorDirty = false;
-  $('editor-dirty').hidden = true;
-  $('file-editor').hidden = true;
+$('editor-close').onclick = () => closeEditor();
+$('editor-close-top').onclick = () => closeEditor();
+$('file-zone').onchange = () => {
+  if (!$('file-editor').hidden && !closeEditor()) { $('file-zone').value = editorZone; return; }
+  filePath = ''; loadFiles();
 };
-$('file-zone').onchange = () => { filePath = ''; $('file-editor').hidden = true; loadFiles(); };
-$('file-up').onclick = () => { filePath = filePath.split('/').slice(0, -1).join('/'); loadFiles(); };
+$('file-up').onclick = () => {
+  if (!closeEditor()) return;
+  filePath = filePath.split('/').slice(0, -1).join('/');
+  loadFiles();
+};
 $('file-newdir').onclick = async () => {
   const name = prompt(window.t('bot.folder_name'));
   if (!name) return;
@@ -502,6 +511,8 @@ $('edit-begin').onclick = async () => {
   await loadEditSession();
   $('file-zone').value = 'edit';
   filePath = '';
+  editorDirty = false;
+  $('editor-dirty').hidden = true;
   $('file-editor').hidden = true;
   loadFiles();
 };
@@ -510,6 +521,8 @@ $('edit-discard').onclick = async () => {
   await apiFetch('/api/bots/' + botId + '/edit-session', { method: 'DELETE' });
   if ($('file-zone').value === 'edit') $('file-zone').value = 'data';
   filePath = '';
+  editorDirty = false;
+  $('editor-dirty').hidden = true;
   $('file-editor').hidden = true;
   $('edit-result').textContent = '';
   await loadEditSession();
@@ -534,6 +547,8 @@ $('edit-commit').onclick = async () => {
     $('state-badge').textContent = data.state;
     $('state-badge').className = 'badge ' + data.state;
   }
+  editorDirty = false;
+  $('editor-dirty').hidden = true;
   $('file-editor').hidden = true;
   await loadEditSession();
   loadReleases();

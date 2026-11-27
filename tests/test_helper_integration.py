@@ -473,3 +473,80 @@ def test_edit_begin_stages_a_copy_and_discard_removes_it(helper: Helper) -> None
     resp = helper.handle({"op": "edit_discard", "bot": BOT_A})
     assert resp["ok"] is True, resp
     assert not (helper.root / "bots" / BOT_A / "edit").exists()
+
+
+def test_edit_zone_writes_belong_to_the_manager(
+    helper: Helper, tmp_path: Path
+) -> None:
+    import pwd as pwd_module
+
+    from botmgr.helperd import SystemExecutor
+
+    # A data root owned by a non-root "manager" uid, so ownership of
+    # helper-written files is observable (as root everything would
+    # trivially match).
+    root = tmp_path / "owned-root"
+    root.mkdir()
+    os.chown(root, 65534, 65534)
+    h = Helper(
+        root=root,
+        executor=SystemExecutor(root, package_dir=helper.package_dir),  # type: ignore[attr-defined]
+    )
+    try:
+        assert h.handle({"op": "create_user", "bot": BOT_A})["ok"] is True
+        release_id = "20261127T010203-ab12"
+        release_dir = root / "bots" / BOT_A / "releases" / release_id
+        release_dir.mkdir(parents=True)
+        (release_dir / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (root / "bots" / BOT_A / "venvs" / release_id).mkdir(parents=True)
+        resp = h.handle(
+            {"op": "publish_release", "bot": BOT_A, "release_id": release_id}
+        )
+        assert resp["ok"] is True, resp
+        resp = h.handle(
+            {"op": "point_current", "bot": BOT_A, "release_id": release_id}
+        )
+        assert resp["ok"] is True, resp
+        resp = h.handle({"op": "edit_begin", "bot": BOT_A})
+        assert resp["ok"] is True, resp
+        # A new file in the staging area belongs to the manager, whose
+        # deploy worker must read the whole tree back at commit time.
+        resp = h.handle(
+            {
+                "op": "file_write",
+                "bot": BOT_A,
+                "zone": "edit",
+                "path": "extra.py",
+                "content": "X = 1\n",
+            }
+        )
+        assert resp["ok"] is True, resp
+        assert os.stat(root / "bots" / BOT_A / "edit" / "extra.py").st_uid == 65534
+        # Editing the staged copy keeps the manager as its owner.
+        resp = h.handle(
+            {
+                "op": "file_write",
+                "bot": BOT_A,
+                "zone": "edit",
+                "path": "main.py",
+                "content": "VALUE = 2\n",
+            }
+        )
+        assert resp["ok"] is True, resp
+        assert os.stat(root / "bots" / BOT_A / "edit" / "main.py").st_uid == 65534
+        # Data-zone writes belong to the bot user instead.
+        resp = h.handle(
+            {
+                "op": "file_write",
+                "bot": BOT_A,
+                "zone": "data",
+                "path": "note.txt",
+                "content": "hi",
+            }
+        )
+        assert resp["ok"] is True, resp
+        bot_uid = pwd_module.getpwnam("bm-itest1").pw_uid
+        assert os.stat(root / "bots" / BOT_A / "data" / "note.txt").st_uid == bot_uid
+    finally:
+        h.handle({"op": "delete_bot_files", "bot": BOT_A})
+        h.handle({"op": "delete_user", "bot": BOT_A})

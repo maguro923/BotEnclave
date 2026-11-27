@@ -699,7 +699,7 @@ def test_bot_create_does_not_confirm_other_users_bot_names(
     assert resp.status_code == 409
 
 
-def test_bot_delete_keeps_files_by_default_and_purges_on_request(
+def test_bot_delete_always_removes_the_whole_tree(
     env: tuple[TestClient, FakeHelper, Path],
 ) -> None:
     client, fake, root = env
@@ -710,12 +710,8 @@ def test_bot_delete_keeps_files_by_default_and_purges_on_request(
 
     resp = admin.delete("/api/bots/alpha")
     assert resp.status_code == 200, resp.text
-    assert fake.purged == []
-    assert bot_dir.exists()  # files are kept unless the operator chooses
-
-    create_bot(admin, "alpha")
-    resp = admin.delete("/api/bots/alpha?purge_files=true")
-    assert resp.status_code == 200, resp.text
+    # Deletion is complete: registration and files go together, so a
+    # reused name can never inherit the previous bot's data.
     assert fake.purged == ["alpha"]
     assert not bot_dir.exists()
 
@@ -800,20 +796,26 @@ def test_deploys_page_requires_login_and_lists_releases(
     assert "20261127T010203-abcd" in detail.text
 
 
-def test_pages_wire_purge_choice_and_live_state_badge(
+def test_pages_wire_complete_delete_and_live_state_badge(
     env: tuple[TestClient, FakeHelper, Path],
 ) -> None:
     client, _fake, root = env
     admin = setup_admin(client, root)
     create_bot(admin, "alpha")
-    # Both delete flows must offer the file-purge choice; without it the
-    # API's purge_files flag is unreachable and the bot folder survives.
+    # Delete is complete-only now: neither page may reference the
+    # removed purge choice, and both ask for confirmation first.
     dashboard = admin.get("/")
     assert dashboard.status_code == 200, dashboard.text
-    assert "purge_files=true" in dashboard.text
+    assert "purge" not in dashboard.text
+    assert "dash.delete_confirm" in dashboard.text
     detail = admin.get("/bots/alpha")
     assert detail.status_code == 200, detail.text
-    assert "purge_files=true" in detail.text
+    assert "purge" not in detail.text
+    assert "bot.delete_confirm" in detail.text
+    # The editor closes when the operator navigates directories, and
+    # has a close button in its header as well as below it.
+    assert "closeEditor" in detail.text
+    assert "editor-close-top" in detail.text
     # The bot page badge follows the live overview stream, so a bot that
     # crashes after a deploy does not keep showing "running".
     assert "/ws/overview" in detail.text

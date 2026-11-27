@@ -25,6 +25,22 @@ die() { printf 'install: %s\n' "$*" >&2; exit 1; }
 command -v systemctl >/dev/null 2>&1 \
     || die "systemd is required for the supported layout"
 
+# 0. Stop a running manager before replacing anything it uses. pip
+#    would otherwise rewrite the package under the live process (its
+#    next helper call could import a half-written tree), and the unit
+#    and sudoers files are regenerated below. "Running" includes a
+#    crash-looping unit (activating), not just a healthy one. Bots
+#    keep running: they live in their own units, and the manager
+#    reattaches on start.
+UNIT_STATE=$(systemctl is-active botenclave 2>/dev/null || true)
+if [ "$UNIT_STATE" != "inactive" ] && [ "$UNIT_STATE" != "failed" ]; then
+    say "Stopping the BotEnclave service while installing (state: $UNIT_STATE)..."
+    systemctl stop botenclave || die "could not stop the botenclave service"
+    if systemctl is-active --quiet botenclave; then
+        die "the BotEnclave service did not stop; stop it manually and re-run"
+    fi
+fi
+
 # 1. Prerequisites (Debian/Ubuntu install them; elsewhere they must
 #    already be present).
 if command -v apt-get >/dev/null 2>&1; then
@@ -43,6 +59,10 @@ if [ ! -x "$VENV/bin/python" ]; then
     mkdir -p "$(dirname "$VENV")"
     python3 -m venv "$VENV"
 fi
+# The install directory itself must stay traversable: under a strict
+# umask the mkdir above leaves it 0770 and locks the manager and bot
+# users out of the very venv they are supposed to execute from.
+chmod a+x "$(dirname "$VENV")"
 "$VENV/bin/pip" install --quiet .
 chmod -R a+rX "$VENV"
 
@@ -79,13 +99,9 @@ if [ -f "$ROOT/setup-token" ]; then
     say "Replaced the setup token with a fresh one (shown below)."
 fi
 
-# 5. Start (or restart, when re-running over a live install).
+# 5. Start the manager (it was stopped in step 0 when it was running).
 systemctl enable botenclave >/dev/null 2>&1 || true
-if systemctl is-active --quiet botenclave; then
-    systemctl restart botenclave
-else
-    systemctl start botenclave
-fi
+systemctl start botenclave
 
 # 6. Wait for the health endpoint.
 i=0

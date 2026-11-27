@@ -8,6 +8,7 @@ Every one must be refused, while normal operations keep working.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,16 @@ def test_write_is_atomic_and_bounded(bot_root: Path) -> None:
     # No temp files are left behind.
     leftovers = [p.name for p in (bot_root / "data").iterdir() if ".tmp-" in p.name]
     assert leftovers == []
+
+
+def test_write_preserves_the_replaced_files_mode(bot_root: Path) -> None:
+    target = bot_root / "data" / "config.json"
+    os.chmod(target, 0o640)
+    fileops.write_file(bot_root, "data", "config.json", '{"a": 2}')
+    # The replacement starts life 0600; without preservation the edit
+    # would silently tighten the file's permissions for its owner.
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o640
+    assert target.read_text(encoding="utf-8") == '{"a": 2}'
     fileops.write_file(bot_root, "data", "config.json", "{}")
     assert (bot_root / "data" / "config.json").read_text(encoding="utf-8") == "{}"
     with pytest.raises(FileOpError) as exc:

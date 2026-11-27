@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Removed: bot deletion's keep-files option (the API's `purge_files`
+  parameter and the CLI's `--purge-files` flag). Deleting a bot now
+  always removes its registration and its whole file tree together;
+  the confirmation prompt says so explicitly.
+- Fixed: saving a release edit as a new release failed with
+  "Permission denied" on the edited files. Files written through the
+  panel are created by the privileged helper and ended up owned by
+  the wrong account (root or the bot) with modes the manager's deploy
+  worker could not read. Helper-written files now belong to their
+  real owner per zone (the bot in `data/`, the manager in the edit
+  staging area), and an edit preserves the replaced file's mode.
+- Changed: `scripts/install.sh` stops a running manager before
+  replacing its package, unit or sudoers files, verifies the stop,
+  and starts the new build afterwards. `scripts/uninstall.sh` stops
+  the manager first and verifies it stopped before removing anything,
+  and refuses a purge while a bot unit is still running. A
+  crash-looping unit (systemd state "activating") counts as running
+  in both scripts. install.sh also keeps the install directory
+  traversable regardless of umask, so the manager and bot users can
+  always execute from the venv.
+- Changed: the file editor now closes when the operator navigates to
+  another directory (with the usual unsaved-changes prompt), and has
+  a close button in its header as well as below the editor.
 - Added: release edit sessions. The Files tab can stage an editable
   copy of the active release; files may be changed one by one and are
   only published when the operator saves them as a new release (the

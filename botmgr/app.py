@@ -535,7 +535,6 @@ def create_app(config: AppConfig) -> FastAPI:
     async def delete_bot(
         user: User = Depends(current_user),  # type: ignore[arg-type]
         stored: StoredBot = Depends(bot_access),
-        purge_files: bool = False,
     ) -> dict[str, str]:
         bot = stored.bot_id
 
@@ -548,15 +547,13 @@ def create_app(config: AppConfig) -> FastAPI:
             secrets_service.delete(bot)
             webhook_secrets.delete(bot)
             client.delete_user(bot)
-            if purge_files:
-                # PLAN 2.4: file handling is the operator's choice in
-                # the delete flow. Kept by default (data outlives the
-                # registration); purging removes the whole bot tree so
-                # a reused name cannot inherit the previous bot's files.
-                client.delete_bot_files(bot)
+            # Deletion is complete: the whole file tree goes with the
+            # registration, so a reused name can never inherit the
+            # previous bot's files (data and releases included).
+            client.delete_bot_files(bot)
 
         await run_in_threadpool(do_delete)
-        audit.record(user.email, "bot.delete", bot, f"purge_files={purge_files}")
+        audit.record(user.email, "bot.delete", bot)
         return {"status": "ok"}
 
     @app.post("/api/bots/{bot_id}/start")

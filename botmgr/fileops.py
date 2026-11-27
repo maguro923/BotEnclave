@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import os
 import secrets as stdlib_secrets
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -159,7 +160,7 @@ def read_file(bot_root: Path, zone: str, rel: str) -> dict[str, object]:
         }
 
 
-def write_file(bot_root: Path, zone: str, rel: str, content: str) -> None:
+def write_file(bot_root: Path, zone: str, rel: str, content: str) -> Path:
     _check_writable(zone)
     if not _split(rel):
         raise FileOpError("bad_path", "a file path is required")
@@ -182,10 +183,19 @@ def write_file(bot_root: Path, zone: str, rel: str, content: str) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+    if target.exists():
+        # An edit must not tighten or loosen the file it replaces: the
+        # temp file starts 0600, which would lock the real owner (the
+        # bot in data/, the manager in edit/) out of their own file.
+        try:
+            os.chmod(tmp, stat.S_IMODE(os.stat(target).st_mode))
+        except OSError:
+            pass
     os.replace(tmp, target)
+    return target
 
 
-def make_dir(bot_root: Path, zone: str, rel: str) -> None:
+def make_dir(bot_root: Path, zone: str, rel: str) -> Path:
     _check_writable(zone)
     if not _split(rel):
         raise FileOpError("bad_path", "a directory path is required")
@@ -195,6 +205,7 @@ def make_dir(bot_root: Path, zone: str, rel: str) -> None:
     if not target.parent.is_dir():
         raise FileOpError("not_dir", "parent directory does not exist")
     target.mkdir()
+    return target
 
 
 def delete_path(bot_root: Path, zone: str, rel: str) -> None:

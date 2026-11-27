@@ -851,25 +851,39 @@ class SystemExecutor:
     def file_read(self, bot: str, zone: str, rel: str) -> dict[str, object]:
         return fileops.read_file(self._bot_root(bot), zone, rel)
 
-    def _chown_to_bot(self, bot: str, path: Path) -> None:
-        """Hand a helper-created path to the bot's user. The helper runs
-        as root, so without this a panel-written file lands root-owned
-        0600 inside the bot's data/ and the bot cannot read its own
-        working files."""
+    def _chown_written(self, bot: str, zone: str, path: Path) -> None:
+        """Hand a helper-written path to its real owner. The helper
+        runs as root, so without this a panel-written file lands
+        root-owned inside somebody else's tree. In data/ the owner is
+        the bot; in the edit staging area it is the manager, whose
+        deploy worker must read the tree back when the edit is saved
+        as a release (a bot-owned 0640 staging file is unreadable to
+        it). Best effort: a non-root executor (direct mode) already
+        owns what it writes. Symlinks are never followed."""
         try:
-            entry = pwd.getpwnam(username_for(bot))
+            bot_entry = pwd.getpwnam(username_for(bot))
         except KeyError:
             return
-        os.chown(path, entry.pw_uid, entry.pw_gid)
+        if zone == "data":
+            uid, gid = bot_entry.pw_uid, bot_entry.pw_gid
+        elif zone == "edit":
+            uid, gid = os.stat(self.root).st_uid, bot_entry.pw_gid
+        else:
+            return
+        try:
+            if path.is_symlink():
+                return
+            os.chown(path, uid, gid, follow_symlinks=False)
+        except OSError:
+            pass
 
     def file_write(self, bot: str, zone: str, rel: str, content: str) -> None:
-        fileops.write_file(self._bot_root(bot), zone, rel, content)
-        self._chown_to_bot(bot, self._bot_root(bot) / zone / rel)
+        target = fileops.write_file(self._bot_root(bot), zone, rel, content)
+        self._chown_written(bot, zone, target)
 
     def file_mkdir(self, bot: str, zone: str, rel: str) -> None:
-        fileops.make_dir(self._bot_root(bot), zone, rel)
-        target = self._bot_root(bot) / zone / rel
-        self._chown_to_bot(bot, target)
+        target = fileops.make_dir(self._bot_root(bot), zone, rel)
+        self._chown_written(bot, zone, target)
         target.chmod(0o750)
 
     def file_delete(self, bot: str, zone: str, rel: str) -> None:

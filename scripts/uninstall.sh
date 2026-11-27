@@ -54,7 +54,21 @@ bot_names() {
 }
 BOTS=$(bot_names | sort -u)
 
-# 1. Stop and disable the bot units and the manager.
+# 1. Stop everything before removing anything. The manager goes
+#    first and its stop is verified: deleting the venv or the data
+#    root under a still-running manager would corrupt live state.
+#    "Running" includes a crash-looping unit (activating).
+unit_running() {
+    state=$(systemctl is-active "$1" 2>/dev/null || true)
+    [ "$state" != "inactive" ] && [ "$state" != "failed" ]
+}
+if unit_running botenclave; then
+    say "Stopping the BotEnclave service..."
+    systemctl stop botenclave || die "could not stop the botenclave service"
+    if systemctl is-active --quiet botenclave; then
+        die "the botenclave service is still running; aborting"
+    fi
+fi
 for bot in $BOTS; do
     systemctl disable --now "botenclave-bot-$bot" >/dev/null 2>&1 || true
 done
@@ -90,6 +104,12 @@ if [ "$PURGE" = 0 ]; then
 fi
 
 # 4. Purge: leftover tmux sockets, the data root and the OS users.
+#    Nothing may still be running when its files and user are deleted.
+for bot in $BOTS; do
+    if unit_running "botenclave-bot-$bot"; then
+        die "bot unit botenclave-bot-$bot is still running; aborting purge"
+    fi
+done
 for bot in $BOTS; do
     uid=$(id -u "bm-$bot" 2>/dev/null || true)
     [ -n "$uid" ] && rm -rf "/tmp/tmux-$uid"
