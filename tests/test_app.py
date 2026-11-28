@@ -268,11 +268,36 @@ def test_bot_create_validation(env: tuple[TestClient, FakeHelper, Path]) -> None
     admin = setup_admin(client, root)
     resp = admin.post("/api/bots", json={"name": "../evil", "command": ["x"]})
     assert resp.status_code == 400
-    resp = admin.post("/api/bots", json={"name": "ok", "command": []})
+    resp = admin.post("/api/bots", json={"name": "ok", "command": "run it"})
     assert resp.status_code == 400
     create_bot(admin, "ok")
     resp = admin.post("/api/bots", json={"name": "ok", "command": ["x"]})
     assert resp.status_code == 409
+
+
+def test_bot_without_command_lifecycle(env: tuple[TestClient, FakeHelper, Path]) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    # Creation succeeds with no command at all, and with an empty one.
+    resp = admin.post("/api/bots", json={"name": "bare"})
+    assert resp.status_code == 200
+    resp = admin.post("/api/bots", json={"name": "bare2", "command": []})
+    assert resp.status_code == 200
+    # It cannot start, and autostart cannot be enabled.
+    resp = admin.post("/api/bots/bare/start")
+    assert resp.status_code == 400
+    assert "launch command" in resp.json()["detail"]
+    resp = admin.put("/api/bots/bare/autostart", json={"autostart": True})
+    assert resp.status_code == 400
+    # Setting a command afterwards (an override; no release yet) makes
+    # it startable and autostart-able.
+    resp = admin.put("/api/bots/bare/command", json={"command": "python3 main.py"})
+    assert resp.status_code == 200
+    resp = admin.put("/api/bots/bare/autostart", json={"autostart": True})
+    assert resp.status_code == 200
+    resp = admin.post("/api/bots/bare/start")
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "running"
 
 
 # -- IDOR suite -----------------------------------------------------------------

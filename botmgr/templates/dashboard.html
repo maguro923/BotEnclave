@@ -8,11 +8,20 @@
   <h2>{{ t('dash.add_bot') }}</h2>
   <form id="create-form">
     <input type="text" id="bot-name" placeholder="{{ t('dash.bot_name') }}" required>
-    <input type="text" id="bot-command" placeholder="{{ t('dash.bot_command') }}" required style="width: 45%;">
+    <input type="text" id="bot-command" placeholder="{{ t('dash.bot_command') }}" style="width: 45%;">
     <select id="bot-python"></select>
     <button type="submit">{{ t('dash.create') }}</button>
     <span id="create-error" class="error"></span>
   </form>
+  <div id="nocmd-modal" hidden style="position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 50;">
+    <div class="card" style="max-width: 30rem; margin: 12vh auto; padding: 1rem 1.25rem;">
+      <p>{{ t('dash.nocmd_warning') }}</p>
+      <p>
+        <button type="button" id="nocmd-proceed">{{ t('dash.nocmd_proceed') }}</button>
+        <button type="button" class="secondary" id="nocmd-cancel">{{ t('dash.nocmd_cancel') }}</button>
+      </p>
+    </div>
+  </div>
   <p class="muted">{{ t('dash.add_note') }}</p>
 </div>
 <div class="card">
@@ -24,7 +33,7 @@
       <td><a href="/bots/{{ bot.id }}">{{ bot.id }}</a></td>
       <td><span class="badge {{ bot.state }}" data-state-for="{{ bot.id }}">{{ bot.state }}</span>{% if bot.dotenv_mode %} <span class="badge backoff" title="dotenv compatibility mode: secrets are also written as plaintext data/.env">dotenv</span>{% endif %}</td>
       <td>
-        <button data-action="start" data-bot="{{ bot.id }}">{{ t('dash.start') }}</button>
+        <button data-action="start" data-bot="{{ bot.id }}"{% if not bot.has_command %} disabled title="{{ t('dash.nocmd_title') }}"{% endif %}>{{ t('dash.start') }}</button>
         <button class="secondary" data-action="stop" data-bot="{{ bot.id }}">{{ t('dash.stop') }}</button>
         <button class="danger" data-action="delete" data-bot="{{ bot.id }}">{{ t('dash.delete') }}</button>
       </td>
@@ -56,10 +65,8 @@ fetch('/api/pythons').then(async (resp) => {
     sel.appendChild(opt);
   }
 }).catch(() => {});
-document.getElementById('create-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
+async function doCreate(command) {
   const name = document.getElementById('bot-name').value.trim();
-  const command = document.getElementById('bot-command').value.trim().split(/\s+/);
   const python = document.getElementById('bot-python').value;
   const payload = { name, command };
   if (python) payload.python_version = python;
@@ -73,6 +80,24 @@ document.getElementById('create-form').addEventListener('submit', async (e) => {
     return;
   }
   location.reload();
+}
+document.getElementById('create-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const raw = document.getElementById('bot-command').value.trim();
+  if (!raw) {
+    // No launch command: warn first; the bot can be created anyway
+    // and given a command later, it just cannot start until then.
+    document.getElementById('nocmd-modal').hidden = false;
+    return;
+  }
+  doCreate(raw.split(/\s+/));
+});
+document.getElementById('nocmd-proceed').addEventListener('click', () => {
+  document.getElementById('nocmd-modal').hidden = true;
+  doCreate([]);
+});
+document.getElementById('nocmd-cancel').addEventListener('click', () => {
+  document.getElementById('nocmd-modal').hidden = true;
 });
 document.querySelectorAll('button[data-action]').forEach((btn) => {
   btn.addEventListener('click', async () => {

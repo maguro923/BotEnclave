@@ -293,10 +293,25 @@ $('rollback-btn').onclick = async () => {
 loadReleases();
 
 // -- launch command ------------------------------------------------------------
+let hasCommand = true;
+function gateActions() {
+  // Without a launch command there is nothing to start: disable the
+  // start button, and disable the autostart toggle unless it is
+  // already on (so it can still be turned off).
+  $('start-btn').disabled = !hasCommand;
+  $('start-btn').title = hasCommand ? '' : window.t('dash.nocmd_title');
+  const asT = $('autostart-toggle');
+  if (asT) {
+    asT.disabled = !hasCommand && !asT.checked;
+    asT.title = hasCommand ? '' : window.t('dash.nocmd_title');
+  }
+}
 function renderCommand(data) {
   $('cmd-current').textContent = data.effective.join(' ');
   $('cmd-kind').textContent = data.override ? window.t('bot.cmd_custom') : window.t('bot.cmd_default');
   $('cmd-input').value = data.effective.join(' ');
+  hasCommand = data.effective.length > 0;
+  gateActions();
 }
 async function loadCommand() {
   const resp = await fetch('/api/bots/' + botId + '/command');
@@ -376,8 +391,9 @@ $('autostart-toggle').onchange = async () => {
   const data = await resp.json().catch(() => ({}));
   showResult($('autostart-result'), resp.ok ? window.t('bot.behavior_saved') : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
   if (!resp.ok) loadBehavior();
+  gateActions();
 };
-loadBehavior();
+loadBehavior().then(gateActions);
 
 // -- live status: state, uptime and disk, refreshed every second ----------------
 async function pollStatus() {

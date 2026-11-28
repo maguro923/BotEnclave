@@ -145,7 +145,7 @@ class LaunchConfig:
     secret_keys: tuple[str, ...] = ()
 
 
-def config_from_json(raw: bytes) -> LaunchConfig:
+def config_from_json(raw: bytes, *, require_command: bool = True) -> LaunchConfig:
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -155,7 +155,7 @@ def config_from_json(raw: bytes) -> LaunchConfig:
     command = data.get("command")
     if (
         not isinstance(command, list)
-        or not command
+        or (require_command and not command)
         or not all(isinstance(part, str) for part in command)
     ):
         raise ValueError("launch configuration needs a non-empty command list")
@@ -203,6 +203,8 @@ def _apply_rlimit(kind: int, value: int) -> None:
 
 def run(config: LaunchConfig) -> None:
     """Replace this process with the bot. Never returns on success."""
+    if not config.command:
+        raise ValueError("launch configuration has no command to run")
     os.chdir(config.cwd)
     if config.rlimit_nofile is not None:
         _apply_rlimit(resource.RLIMIT_NOFILE, config.rlimit_nofile)

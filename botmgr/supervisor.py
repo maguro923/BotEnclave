@@ -35,6 +35,10 @@ class SecretPendingError(Exception):
     """The bot's secrets are not available to this process (PLAN 2.3)."""
 
 
+class NoCommandError(Exception):
+    """The bot has no launch command, so there is nothing to start."""
+
+
 class UnknownBotError(KeyError):
     """The bot id has not been registered with this supervisor."""
 
@@ -152,10 +156,27 @@ class Supervisor:
         if not entry.lock.acquire(blocking=False):
             raise BusyError("operation already in progress for this bot")
 
+    def _effective_command(self, bot_id: str, entry: _BotEntry) -> tuple[str, ...]:
+        """The command a start would actually run. With no active
+        release, a stored command override IS the launch command (the
+        deploy path folds it into the config when a release exists);
+        without either, the registered command stands."""
+        if self._store is not None:
+            stored = self._store.get_bot(bot_id)
+            if (
+                stored is not None
+                and stored.command_override
+                and self._store.active_release(bot_id) is None
+            ):
+                return tuple(stored.command_override)
+        return tuple(entry.config.command)
+
     def start(self, bot_id: str) -> None:
         entry = self._entry(bot_id)
         self._locked(entry)
         try:
+            if not self._effective_command(bot_id, entry):
+                raise NoCommandError(bot_id)
             resolution = self._resolve(bot_id)
             if resolution is not None and resolution.env is None:
                 entry.machine.mark_secret_pending(self._now())
@@ -196,6 +217,9 @@ class Supervisor:
         if resolution is None:
             resolution = self._resolve(bot_id)
         config = entry.config
+        effective = self._effective_command(bot_id, entry)
+        if tuple(config.command) != effective:
+            config = dataclasses.replace(config, command=effective)
         if resolution is not None:
             if resolution.env is None:
                 entry.machine.mark_secret_pending(self._now())

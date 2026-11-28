@@ -26,7 +26,7 @@ from botmgr.launcher import LaunchConfig
 from botmgr.pythons import InstallError, install_python, is_supported
 from botmgr.reconcile import ReconcileReport, reconcile
 from botmgr.store import StateStore
-from botmgr.supervisor import Supervisor
+from botmgr.supervisor import NoCommandError, Supervisor
 from botmgr.watchdog import Watchdog
 
 
@@ -547,9 +547,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "user-delete":
             print(runtime.client.delete_user(args.bot))
         elif args.command == "bot-add":
+            # The command may be omitted: the bot is registered with
+            # no launch command and cannot start until one is set.
             command = command_tail or list(args.bot_command)
-            if not command:
-                parser.error("bot-add needs a command after --")
             env: dict[str, str] = {}
             for pair in args.env:
                 key, sep, value = pair.partition("=")
@@ -573,9 +573,18 @@ def main(argv: list[str] | None = None) -> int:
                 runtime.store.set_python_version(
                     args.bot, args.python_version
                 )
-            print(f"registered {args.bot}")
+            if command:
+                print(f"registered {args.bot}")
+            else:
+                print(
+                    f"registered {args.bot} (no launch command;"
+                    " it cannot start until one is set)"
+                )
         elif args.command == "bot-start":
-            supervisor.start(args.bot)
+            try:
+                supervisor.start(args.bot)
+            except NoCommandError:
+                parser.error(f"{args.bot} has no launch command; set one first")
             print(f"{args.bot}: {supervisor.state(args.bot).value}")
         elif args.command == "bot-stop":
             supervisor.stop(args.bot)

@@ -124,7 +124,10 @@ def config_to_json(config: LaunchConfig) -> str:
 def config_from_stored(text: str) -> LaunchConfig:
     from botmgr.launcher import config_from_json
 
-    return config_from_json(text.encode())
+    # A registered bot may legitimately have no launch command yet
+    # (created before its files were installed); only the spawn path
+    # requires one.
+    return config_from_json(text.encode(), require_command=False)
 
 
 class StateStore:

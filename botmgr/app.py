@@ -84,7 +84,7 @@ from botmgr.reconcile import reconcile
 from botmgr.secrets import decrypt_text, encrypt_text, load_or_create_fernet
 from botmgr.state import RESTART_POLICIES, BotState
 from botmgr.store import StateStore, StoredBot
-from botmgr.supervisor import BusyError, SecretPendingError, Supervisor
+from botmgr.supervisor import BusyError, NoCommandError, SecretPendingError, Supervisor
 from botmgr.timeutil import (
     configured_tz,
     configured_tz_name,
@@ -314,6 +314,11 @@ def create_app(config: AppConfig) -> FastAPI:
             bot = stored_bot.bot_id
             if supervisor.state(bot) not in (BotState.STOPPED, BotState.ATTENTION):
                 continue
+            if not deploy_service.command_info(bot)["effective"]:
+                # Autostart was on but the command is gone (or was
+                # never set): not a failure, just nothing to start.
+                audit.record("system", "bot.autostart_skipped", bot, "no launch command")
+                continue
             try:
                 await run_in_threadpool(supervisor.start, bot)
                 audit.record("system", "bot.autostart", bot)
@@ -443,6 +448,9 @@ def create_app(config: AppConfig) -> FastAPI:
                         "state": supervisor.state(b.bot_id).value,
                         "secret_backend": b.secret_backend,
                         "dotenv_mode": b.dotenv_mode,
+                        "has_command": bool(
+                            deploy_service.command_info(b.bot_id)["effective"]
+                        ),
                     }
                     for b in bots
                 ],
@@ -575,12 +583,16 @@ def create_app(config: AppConfig) -> FastAPI:
         command = body.get("command")
         if not isinstance(name, str) or not BOT_NAME_RE.match(name):
             raise HTTPException(status_code=400, detail="invalid bot name")
-        if (
-            not isinstance(command, list)
-            or not command
-            or not all(isinstance(part, str) for part in command)
+        # The launch command is optional at creation: a bot can be
+        # registered first and given a command later (after its files
+        # are uploaded and installed). It simply cannot start until
+        # then; the supervisor enforces that.
+        if command is None:
+            command = []
+        if not isinstance(command, list) or not all(
+            isinstance(part, str) for part in command
         ):
-            raise HTTPException(status_code=400, detail="command must be a non-empty list")
+            raise HTTPException(status_code=400, detail="command must be a list of strings")
         existing = store.get_bot(name)
         if existing is not None:
             if user.is_superuser or existing.owner_id == user.id:
@@ -660,6 +672,11 @@ def create_app(config: AppConfig) -> FastAPI:
             await run_in_threadpool(supervisor.start, stored.bot_id)
         except BusyError:
             raise HTTPException(status_code=409, detail="operation in progress") from None
+        except NoCommandError:
+            raise HTTPException(
+                status_code=400,
+                detail="no launch command is set for this bot",
+            ) from None
         except SecretPendingError:
             audit.record(user.email, "bot.start.secret_pending", stored.bot_id)
             return {"state": "secret-pending"}
@@ -1182,6 +1199,11 @@ def create_app(config: AppConfig) -> FastAPI:
         enabled = payload.get("autostart")
         if not isinstance(enabled, bool):
             raise HTTPException(status_code=400, detail="autostart must be a boolean")
+        if enabled and not deploy_service.command_info(bot)["effective"]:
+            raise HTTPException(
+                status_code=400,
+                detail="autostart needs a launch command; set one first",
+            )
         store.set_autostart(bot, enabled)
         audit.record(user.email, "bot.autostart", bot, str(enabled).lower())
         return {"autostart": enabled}

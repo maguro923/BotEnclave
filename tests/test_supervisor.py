@@ -207,3 +207,39 @@ def test_start_records_log_display_offset(tmp_path: Path) -> None:
     stored = store.get_bot("alpha")
     assert stored is not None
     assert stored.log_from_offset == len(previous)
+
+
+def test_start_without_command_is_refused(tmp_path: Path) -> None:
+    from botmgr.store import StateStore
+    from botmgr.supervisor import NoCommandError
+
+    store = StateStore(tmp_path / "state.db")
+    backend = FakeBackend()
+    sup = Supervisor(backend, now_fn=FakeClock(), store=store)
+    empty = LaunchConfig(command=(), cwd="/tmp", env={})
+    sup.register("alpha", empty)
+    with pytest.raises(NoCommandError):
+        sup.start("alpha")
+    assert backend.started == []
+    assert sup.state("alpha") is BotState.STOPPED
+
+
+def test_start_uses_override_when_no_release(tmp_path: Path) -> None:
+    from botmgr.store import StateStore
+
+    store = StateStore(tmp_path / "state.db")
+    backend = FakeBackend()
+    seen: list[LaunchConfig] = []
+    real_start = backend.start
+
+    def capturing(bot_id: str, config: LaunchConfig) -> ProcessIdentity:
+        seen.append(config)
+        return real_start(bot_id, config)
+
+    backend.start = capturing  # type: ignore[method-assign]
+    sup = Supervisor(backend, now_fn=FakeClock(), store=store)
+    sup.register("alpha", LaunchConfig(command=(), cwd="/tmp", env={}))
+    store.set_command_override("alpha", ["python3", "main.py"])
+    sup.start("alpha")
+    assert sup.state("alpha") is BotState.RUNNING
+    assert seen[0].command == ("python3", "main.py")
