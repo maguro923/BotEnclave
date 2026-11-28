@@ -124,7 +124,7 @@ class HelperClient:
         return bool(result["enabled"])
 
     def open_console_stream(
-        self, bot: str, cols: int, rows: int
+        self, bot: str, cols: int, rows: int, session: str = "main"
     ) -> ConsoleStream | None:
         """Spawn the helper's streaming console for this bot, or None
         when the transport cannot stream (in-process fakes)."""
@@ -133,26 +133,51 @@ class HelperClient:
             return None
         env = getattr(self._transport, "stream_env", None)
         proc = subprocess.Popen(
-            [*prefix, "--console-stream", bot, str(cols), str(rows)],
+            [*prefix, "--console-stream", bot, str(cols), str(rows), session],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             env=env if isinstance(env, dict) else None,
         )
         return ConsoleStream(proc)
 
-    def console_snapshot(self, bot: str) -> str:
-        result = self._call({"op": "console_snapshot", "bot": bot})
+    def console_snapshot(self, bot: str, session: str = "main") -> str:
+        result = self._call(
+            {"op": "console_snapshot", "bot": bot, "session": session}
+        )
         return str(result["text"])
 
-    def console_send(self, bot: str, text: str, enter: bool = True) -> None:
+    def console_send(
+        self, bot: str, text: str, enter: bool = True, session: str = "main"
+    ) -> None:
         self._call(
-            {"op": "console_send", "bot": bot, "text": text, "enter": enter}
+            {
+                "op": "console_send",
+                "bot": bot,
+                "text": text,
+                "enter": enter,
+                "session": session,
+            }
         )
 
-    def console_resize(self, bot: str, cols: int, rows: int) -> None:
+    def console_resize(
+        self, bot: str, cols: int, rows: int, session: str = "main"
+    ) -> None:
         self._call(
-            {"op": "console_resize", "bot": bot, "cols": cols, "rows": rows}
+            {
+                "op": "console_resize",
+                "bot": bot,
+                "cols": cols,
+                "rows": rows,
+                "session": session,
+            }
         )
+
+    def ensure_shell(self, bot: str) -> None:
+        self._call({"op": "ensure_shell", "bot": bot})
+
+    def shell_run(self, bot: str, rel: str) -> str:
+        result = self._call({"op": "shell_run", "bot": bot, "path": rel})
+        return str(result["command"])
 
     def console_clear_history(self, bot: str) -> None:
         self._call({"op": "console_clear_history", "bot": bot})

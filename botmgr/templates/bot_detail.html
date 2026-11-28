@@ -112,6 +112,23 @@
 </div>
 
 <div class="card">
+  <p>
+    <button type="button" id="console-target-main">{{ t('bot.console_main') }}</button>
+    <button type="button" class="secondary" id="console-target-shell">{{ t('bot.console_shell') }}</button>
+    <span class="muted">{{ t('bot.console_shell_note') }}</span>
+  </p>
+  <p>
+    <button type="button" class="secondary" id="run-file-open">{{ t('bot.run_file') }}</button>
+    <span id="run-file-box" hidden>
+      <select id="run-file-select"></select>
+      <button type="button" id="run-file-go">{{ t('bot.run_file_go') }}</button>
+      <button type="button" class="secondary" id="run-file-cancel">{{ t('dash.nocmd_cancel') }}</button>
+    </span>
+    <span id="run-file-result"></span>
+  </p>
+</div>
+
+<div class="card">
   <h2>{{ t('bot.log') }} <button type="button" class="secondary" id="log-clear">{{ t('bot.log_clear') }}</button></h2>
   <pre class="log" id="log"></pre>
 </div>
@@ -879,6 +896,7 @@ term.open(document.getElementById('terminal'));
 fit.fit();
 let consoleWs = null;
 let consoleRetryMs = 1000;
+let consoleTarget = 'main';
 // Streaming mode (the usual path): the server forwards the pane's
 // raw byte stream, so the terminal behaves like a hypervisor web
 // console — real scrollback, no snapshot redraws. If the server
@@ -891,7 +909,7 @@ function consoleSend(payload) {
   }
 }
 function connectConsoleWs() {
-  const ws = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/console');
+  const ws = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/console?target=' + consoleTarget);
   consoleWs = ws;
   ws.binaryType = 'arraybuffer';
   let opened = false;
@@ -928,6 +946,67 @@ function connectConsoleWs() {
   };
 }
 connectConsoleWs();
+function switchConsoleTarget(target) {
+  if (consoleTarget === target) return;
+  consoleTarget = target;
+  $('console-target-main').className = target === 'main' ? '' : 'secondary';
+  $('console-target-shell').className = target === 'shell' ? '' : 'secondary';
+  if (consoleWs) {
+    consoleWs.onclose = null;
+    consoleWs.close();
+  }
+  consoleRetryMs = 1000;
+  term.reset();
+  connectConsoleWs();
+}
+$('console-target-main').onclick = () => switchConsoleTarget('main');
+$('console-target-shell').onclick = () => switchConsoleTarget('shell');
+
+// -- run a file from data/ in the operator shell --------------------------------
+async function collectDataFiles(rel, depth, out) {
+  if (depth > 6 || out.length >= 300) return;
+  const resp = await fetch('/api/bots/' + botId + '/files?zone=data&path=' + encodeURIComponent(rel));
+  if (!resp.ok) return;
+  const data = await resp.json();
+  for (const entry of data.entries) {
+    const path = rel ? rel + '/' + entry.name : entry.name;
+    if (entry.kind === 'file') out.push(path);
+    else if (entry.kind === 'dir') await collectDataFiles(path, depth + 1, out);
+  }
+}
+$('run-file-open').onclick = async () => {
+  const box = $('run-file-box');
+  if (!box.hidden) { box.hidden = true; return; }
+  const files = [];
+  await collectDataFiles('', 0, files);
+  const sel = $('run-file-select');
+  sel.innerHTML = '';
+  for (const path of files) {
+    const opt = document.createElement('option');
+    opt.value = path;
+    opt.textContent = path;
+    sel.appendChild(opt);
+  }
+  box.hidden = files.length === 0;
+  if (!files.length) showResult($('run-file-result'), window.t('bot.run_file_empty'));
+};
+$('run-file-cancel').onclick = () => { $('run-file-box').hidden = true; };
+$('run-file-go').onclick = async () => {
+  const path = $('run-file-select').value;
+  if (!path) return;
+  const resp = await apiFetch('/api/bots/' + botId + '/console/run-file', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (resp.ok) {
+    $('run-file-box').hidden = true;
+    showResult($('run-file-result'), window.t('bot.run_file_ran').replace('{cmd}', data.command));
+    switchConsoleTarget('shell');
+  } else {
+    showResult($('run-file-result'), window.t('bot.failed').replace('{detail}', data.detail || resp.status));
+  }
+};
 term.onData((data) => {
   if (consoleStreaming) {
     consoleSend(new TextEncoder().encode(data));

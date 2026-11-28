@@ -100,6 +100,19 @@ def _reject_unknown_keys(request: dict[str, object], allowed: set[str]) -> None:
         raise RequestError("bad_request", f"unknown fields: {sorted(unknown)}")
 
 
+CONSOLE_SESSIONS = ("main", "shell")
+
+
+def _session_of(request: dict[str, object]) -> str:
+    """The console's tmux session: the bot's own pane ("main") or the
+    operator shell ("shell"). A fixed set, never a free-form target,
+    so a request can never aim the console at another tmux session."""
+    session = request.get("session", "main")
+    if session not in CONSOLE_SESSIONS:
+        raise RequestError("bad_request", "session must be 'main' or 'shell'")
+    return str(session)
+
+
 class Executor(Protocol):
     def create_user(self, bot: str) -> None: ...
     def delete_user(self, bot: str) -> None: ...
@@ -113,9 +126,15 @@ class Executor(Protocol):
     ) -> tuple[bool, int | None]: ...
     def set_capture(self, bot: str, enabled: bool) -> None: ...
     def capture_state(self, bot: str) -> bool: ...
-    def console_snapshot(self, bot: str) -> str: ...
-    def console_send(self, bot: str, text: str, enter: bool) -> None: ...
-    def console_resize(self, bot: str, cols: int, rows: int) -> None: ...
+    def console_snapshot(self, bot: str, session: str = "main") -> str: ...
+    def console_send(
+        self, bot: str, text: str, enter: bool, session: str = "main"
+    ) -> None: ...
+    def console_resize(
+        self, bot: str, cols: int, rows: int, session: str = "main"
+    ) -> None: ...
+    def ensure_shell(self, bot: str) -> None: ...
+    def shell_run(self, bot: str, rel: str) -> str: ...
     def console_clear_history(self, bot: str) -> None: ...
     def ensure_layout(self, bot: str) -> None: ...
     def publish_release(self, bot: str, release_id: str) -> None: ...
@@ -233,11 +252,11 @@ class Helper:
             bot = validate_bot_name(request.get("bot"))
             return {"enabled": self.executor.capture_state(bot)}
         if op == "console_snapshot":
-            _reject_unknown_keys(request, {"op", "bot"})
+            _reject_unknown_keys(request, {"op", "bot", "session"})
             bot = validate_bot_name(request.get("bot"))
-            return {"text": self.executor.console_snapshot(bot)}
+            return {"text": self.executor.console_snapshot(bot, _session_of(request))}
         if op == "console_send":
-            _reject_unknown_keys(request, {"op", "bot", "text", "enter"})
+            _reject_unknown_keys(request, {"op", "bot", "text", "enter", "session"})
             bot = validate_bot_name(request.get("bot"))
             text = request.get("text")
             if not isinstance(text, str) or len(text) > 4096 or "\x00" in text:
@@ -245,8 +264,23 @@ class Helper:
             enter = request.get("enter", True)
             if not isinstance(enter, bool):
                 raise RequestError("bad_request", "enter must be a boolean")
-            self.executor.console_send(bot, text, enter)
+            self.executor.console_send(bot, text, enter, _session_of(request))
             return {"sent": len(text)}
+        if op == "ensure_shell":
+            _reject_unknown_keys(request, {"op", "bot"})
+            bot = validate_bot_name(request.get("bot"))
+            self.executor.ensure_shell(bot)
+            return {"shell": True}
+        if op == "shell_run":
+            _reject_unknown_keys(request, {"op", "bot", "path"})
+            bot = validate_bot_name(request.get("bot"))
+            rel = request.get("path")
+            if not isinstance(rel, str) or not rel:
+                raise RequestError("bad_request", "path must be a string")
+            try:
+                return {"command": self.executor.shell_run(bot, rel)}
+            except fileops.FileOpError as exc:
+                raise RequestError(exc.code, exc.message) from exc
         if op == "ensure_layout":
             _reject_unknown_keys(request, {"op", "bot"})
             bot = validate_bot_name(request.get("bot"))
@@ -299,7 +333,7 @@ class Helper:
             self.executor.console_clear_history(bot)
             return {"cleared": True}
         if op == "console_resize":
-            _reject_unknown_keys(request, {"op", "bot", "cols", "rows"})
+            _reject_unknown_keys(request, {"op", "bot", "cols", "rows", "session"})
             bot = validate_bot_name(request.get("bot"))
             cols = request.get("cols")
             rows = request.get("rows")
@@ -307,7 +341,7 @@ class Helper:
                 raise RequestError("bad_request", "cols out of range")
             if not isinstance(rows, int) or not 5 <= rows <= 200:
                 raise RequestError("bad_request", "rows out of range")
-            self.executor.console_resize(bot, cols, rows)
+            self.executor.console_resize(bot, cols, rows, _session_of(request))
             return {"cols": cols, "rows": rows}
         raise RequestError("bad_request", f"unknown op: {op!r}")
 
@@ -945,8 +979,8 @@ class SystemExecutor:
             if proc.returncode != 0:
                 raise RuntimeError(f"pipe-pane close failed: {proc.stderr.strip()}")
 
-    def console_snapshot(self, bot: str) -> str:
-        proc = self._tmux(bot, "capture-pane", "-p", "-t", "main")
+    def console_snapshot(self, bot: str, session: str = "main") -> str:
+        proc = self._tmux(bot, "capture-pane", "-p", "-t", session)
         if proc.returncode != 0:
             # A bot that is not running has no tmux server to capture:
             # that is an empty pane, not an error (the panel falls
@@ -965,22 +999,100 @@ class SystemExecutor:
             raise RuntimeError(f"capture-pane failed: {stderr}")
         return proc.stdout
 
-    def console_send(self, bot: str, text: str, enter: bool) -> None:
+    def console_send(
+        self, bot: str, text: str, enter: bool, session: str = "main"
+    ) -> None:
         if text:
-            proc = self._tmux(bot, "send-keys", "-t", "main", "-l", "--", text)
+            proc = self._tmux(bot, "send-keys", "-t", session, "-l", "--", text)
             if proc.returncode != 0:
                 raise RuntimeError(f"send-keys failed: {proc.stderr.strip()}")
         if enter:
-            proc = self._tmux(bot, "send-keys", "-t", "main", "Enter")
+            proc = self._tmux(bot, "send-keys", "-t", session, "Enter")
             if proc.returncode != 0:
                 raise RuntimeError(f"send-keys Enter failed: {proc.stderr.strip()}")
 
-    def console_resize(self, bot: str, cols: int, rows: int) -> None:
+    def console_resize(
+        self, bot: str, cols: int, rows: int, session: str = "main"
+    ) -> None:
         proc = self._tmux(
-            bot, "resize-pane", "-t", "main", "-x", str(cols), "-y", str(rows)
+            bot, "resize-pane", "-t", session, "-x", str(cols), "-y", str(rows)
         )
         if proc.returncode != 0:
             raise RuntimeError(f"resize-pane failed: {proc.stderr.strip()}")
+
+    def ensure_shell(self, bot: str) -> None:
+        """Make sure the bot's tmux server has a "shell" session: an
+        interactive /bin/sh as the bot user in data/, for install
+        scripts and other manual work. It carries no log capture (what
+        is typed there, installers' output included, is not part of
+        the bot's console log) and no privilege beyond the bot's own:
+        the bot's deployed code runs as the same user."""
+        data_dir = self.root / "bots" / bot / "data"
+        proc = self._tmux(bot, "has-session", "-t", "shell")
+        if proc.returncode == 0:
+            dead = self._tmux(
+                bot, "display-message", "-p", "-t", "shell", "#{pane_dead}"
+            )
+            if dead.stdout.strip() == "1":
+                proc = self._tmux(
+                    bot,
+                    "respawn-pane",
+                    "-k",
+                    "-t",
+                    "shell",
+                    "-c",
+                    str(data_dir),
+                    "/bin/sh",
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(
+                        f"respawn-pane failed: {proc.stderr.strip()}"
+                    )
+            return
+        proc = self._tmux(
+            bot,
+            "new-session",
+            "-d",
+            "-s",
+            "shell",
+            "-c",
+            str(data_dir),
+            "/bin/sh",
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"new-session failed: {proc.stderr.strip()}")
+
+    def shell_run(self, bot: str, rel: str) -> str:
+        """Type a file's run command into the bot's shell session and
+        return the command line used. The file must live in data/
+        (the file manager's resolution rules apply: no symlinks, no
+        escapes). Scripts run through their interpreter, so no
+        executable bit is needed; anything else is executed directly."""
+        bot_root = self.root / "bots" / bot
+        parts = fileops._split(rel)
+        if not parts:
+            raise fileops.FileOpError("bad_path", "a file path is required")
+        target = fileops._resolve(bot_root, "data", rel)
+        if not target.is_file():
+            raise fileops.FileOpError("not_file", f"not a file: {rel}")
+        rel_posix = "/".join(parts)
+        if rel_posix.endswith(".sh"):
+            argv = ["bash", rel_posix]
+        elif rel_posix.endswith(".py"):
+            python = "python3"
+            current = bot_root / "current"
+            if current.is_symlink():
+                release_id = Path(os.readlink(current)).name
+                candidate = bot_root / "venvs" / release_id / "bin" / "python"
+                if candidate.exists():
+                    python = str(candidate)
+            argv = [python, rel_posix]
+        else:
+            argv = ["./" + rel_posix]
+        line = shlex.join(argv)
+        self.ensure_shell(bot)
+        self.console_send(bot, line, True, session="shell")
+        return line
 
     def console_clear_history(self, bot: str) -> None:
         proc = self._tmux(bot, "clear-history", "-t", "main")
@@ -1244,9 +1356,9 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
     )
 
 
-def _session_exists(executor: SystemExecutor, bot: str) -> bool:
+def _session_exists(executor: SystemExecutor, bot: str, session: str = "main") -> bool:
     try:
-        proc = executor._tmux(bot, "has-session", "-t", "main")
+        proc = executor._tmux(bot, "has-session", "-t", session)
     except OSError:
         return False
     return proc.returncode == 0
@@ -1257,6 +1369,7 @@ def _wait_for_session(
     bot: str,
     timeout: float = 30.0,
     interval: float = 0.25,
+    session: str = "main",
 ) -> bool:
     """Wait for the bot's tmux session to appear.
 
@@ -1270,7 +1383,7 @@ def _wait_for_session(
 
     deadline = time.monotonic() + timeout
     while True:
-        if _session_exists(executor, bot):
+        if _session_exists(executor, bot, session):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -1278,7 +1391,7 @@ def _wait_for_session(
 
 
 def run_console_stream(
-    executor: SystemExecutor, bot: str, cols: int, rows: int
+    executor: SystemExecutor, bot: str, cols: int, rows: int, session: str = "main"
 ) -> int:
     """Streaming console mode: attach a tmux client to the bot's pane on
     a fresh PTY (as the bot user) and pump raw terminal bytes between
@@ -1293,9 +1406,17 @@ def run_console_stream(
     import select
 
     bot = validate_bot_name(bot)
+    if session not in CONSOLE_SESSIONS:
+        return 2
     cols = min(max(cols, 1), 500)
     rows = min(max(rows, 1), 200)
-    if not _wait_for_session(executor, bot):
+    if session == "shell":
+        # The shell is created on demand; the wait below then succeeds
+        # immediately. For "main" a missing session means the bot is
+        # not running, which the wait-and-degrade path handles.
+        with contextlib.suppress(Exception):
+            executor.ensure_shell(bot)
+    if not _wait_for_session(executor, bot, session=session):
         # No pane to attach to: end without emitting any data, so
         # the manager degrades to snapshot polling for this console.
         sys.stdout.write(json.dumps({"type": "exit"}) + "\n")
@@ -1314,7 +1435,7 @@ def run_console_stream(
             str(executor.package_dir / "tmux.conf"),
             "attach-session",
             "-t",
-            "main",
+            session,
         ]
     )
     master, slave = pty.openpty()
@@ -1409,10 +1530,13 @@ def main(argv: list[str]) -> int:
     # pass it on to the bots' panes and log capture, whose files the
     # manager and the bots must be able to read.
     os.umask(0o022)
-    if len(argv) == 5 and argv[1] == "--console-stream":
+    if len(argv) in (5, 6) and argv[1] == "--console-stream":
         try:
             cols, rows = int(argv[3]), int(argv[4])
-            return run_console_stream(_build_executor(), argv[2], cols, rows)
+            session = argv[5] if len(argv) == 6 else "main"
+            return run_console_stream(
+                _build_executor(), argv[2], cols, rows, session
+            )
         except Exception:  # noqa: BLE001 - no JSON channel in stream mode
             return 2
     root = Path(os.environ.get("BOTENCLAVE_ROOT", str(DEFAULT_ROOT)))

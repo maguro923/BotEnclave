@@ -138,6 +138,19 @@ class FakeHelper:
             pass
         elif op == "console_clear_history":
             self.cleared.append(bot)
+        elif op == "ensure_shell":
+            result = {"shell": True}
+        elif op == "shell_run":
+            rel = str(request["path"])
+            target = self._bot_root(bot) / "data" / rel
+            if not target.is_file():
+                return {
+                    "ok": False,
+                    "error": "not_file",
+                    "message": f"not a file: {rel}",
+                }
+            self.sent.append((bot, f"bash {rel}", True))
+            result = {"command": f"bash {rel}"}
         elif op == "install_tree":
             src = Path(str(request["source"]))
             dest = self._bot_root(bot) / "data"
@@ -437,7 +450,7 @@ def test_console_streaming_mode(
     opened: list[tuple[str, int, int]] = []
 
     def fake_open(
-        self: HelperClient, bot: str, cols: int, rows: int
+        self: HelperClient, bot: str, cols: int, rows: int, session: str = "main"
     ) -> FakeStream:
         opened.append((bot, cols, rows))
         return stream
@@ -500,7 +513,7 @@ def test_console_stream_instant_exit_falls_back_to_snapshots(
     monkeypatch.setattr(
         HelperClient,
         "open_console_stream",
-        lambda self, bot, cols, rows: stream,
+        lambda self, bot, cols, rows, session="main": stream,
     )
     client, _fake, root = env
     admin = setup_admin(client, root)
@@ -554,7 +567,7 @@ def test_console_stream_exit_closes_websocket(
     monkeypatch.setattr(
         HelperClient,
         "open_console_stream",
-        lambda self, bot, cols, rows: stream,
+        lambda self, bot, cols, rows, session="main": stream,
     )
     client, _fake, root = env
     admin = setup_admin(client, root)
@@ -1652,4 +1665,25 @@ def test_upload_tree_into_data(env: tuple[TestClient, FakeHelper, Path]) -> None
         files=[("files", ("a.txt", b"x"))],
         data={"paths": json.dumps(["a.txt", "b.txt"])},
     )
+    assert resp.status_code == 400
+
+
+def test_console_run_file(env: tuple[TestClient, FakeHelper, Path]) -> None:
+    client, fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    data_dir = root / "bots" / "alpha" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    resp = admin.post(
+        "/api/bots/alpha/console/run-file", json={"path": "install.sh"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["command"] == "bash install.sh"
+    assert ("alpha", "bash install.sh", True) in fake.sent
+    resp = admin.post(
+        "/api/bots/alpha/console/run-file", json={"path": "missing.sh"}
+    )
+    assert resp.status_code == 400
+    resp = admin.post("/api/bots/alpha/console/run-file", json={})
     assert resp.status_code == 400

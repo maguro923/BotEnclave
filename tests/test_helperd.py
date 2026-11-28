@@ -50,15 +50,26 @@ class FakeExecutor:
         self.calls.append(("capture_state", (bot,)))
         return True
 
-    def console_snapshot(self, bot: str) -> str:
-        self.calls.append(("console_snapshot", (bot,)))
+    def console_snapshot(self, bot: str, session: str = "main") -> str:
+        self.calls.append(("console_snapshot", (bot, session)))
         return "screen text"
 
-    def console_send(self, bot: str, text: str, enter: bool) -> None:
-        self.calls.append(("console_send", (bot, text, enter)))
+    def console_send(
+        self, bot: str, text: str, enter: bool, session: str = "main"
+    ) -> None:
+        self.calls.append(("console_send", (bot, text, enter, session)))
 
-    def console_resize(self, bot: str, cols: int, rows: int) -> None:
-        self.calls.append(("console_resize", (bot, cols, rows)))
+    def console_resize(
+        self, bot: str, cols: int, rows: int, session: str = "main"
+    ) -> None:
+        self.calls.append(("console_resize", (bot, cols, rows, session)))
+
+    def ensure_shell(self, bot: str) -> None:
+        self.calls.append(("ensure_shell", (bot,)))
+
+    def shell_run(self, bot: str, rel: str) -> str:
+        self.calls.append(("shell_run", (bot, rel)))
+        return f"bash {rel}"
 
     def console_clear_history(self, bot: str) -> None:
         self.calls.append(("console_clear_history", (bot,)))
@@ -278,7 +289,7 @@ def test_console_send_validates_text(helper: tuple[Helper, FakeExecutor]) -> Non
     assert ex.calls == []
     resp = h.handle({"op": "console_send", "bot": "alpha", "text": "hello"})
     assert resp == {"ok": True, "result": {"sent": 5}}
-    assert ex.calls == [("console_send", ("alpha", "hello", True))]
+    assert ex.calls == [("console_send", ("alpha", "hello", True, "main"))]
 
 
 def test_console_resize_validates_range(helper: tuple[Helper, FakeExecutor]) -> None:
@@ -610,3 +621,25 @@ def test_install_tree_dispatch(helper: tuple[Helper, FakeExecutor]) -> None:
     assert ex.calls == [("install_tree", ("alpha", "/srv/x/tmp/tree-1"))]
     resp = h.handle({"op": "install_tree", "bot": "alpha"})
     assert resp["ok"] is False
+
+
+def test_shell_ops_dispatch(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, ex = helper
+    resp = h.handle({"op": "ensure_shell", "bot": "alpha"})
+    assert resp == {"ok": True, "result": {"shell": True}}
+    resp = h.handle({"op": "shell_run", "bot": "alpha", "path": "install.sh"})
+    assert resp == {"ok": True, "result": {"command": "bash install.sh"}}
+    assert ex.calls == [
+        ("ensure_shell", ("alpha",)),
+        ("shell_run", ("alpha", "install.sh")),
+    ]
+    # A free-form session target is never accepted.
+    resp = h.handle(
+        {"op": "console_send", "bot": "alpha", "text": "x", "session": "other"}
+    )
+    assert resp["ok"] is False
+    resp = h.handle(
+        {"op": "console_snapshot", "bot": "alpha", "session": "shell"}
+    )
+    assert resp == {"ok": True, "result": {"text": "screen text"}}
+    assert ex.calls[-1] == ("console_snapshot", ("alpha", "shell"))

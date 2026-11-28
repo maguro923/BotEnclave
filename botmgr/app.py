@@ -713,6 +713,26 @@ def create_app(config: AppConfig) -> FastAPI:
         )
         return {"lines": mask_lines(segment, mask_for(stored.bot_id))}
 
+    @app.post("/api/bots/{bot_id}/console/run-file")
+    async def console_run_file(
+        payload: dict[str, object],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, str]:
+        """Run one file from data/ in the bot's operator shell (for
+        install scripts). The command is typed into the shell session;
+        its output is watched there, in the console's shell view."""
+        bot = stored.bot_id
+        rel = payload.get("path")
+        if not isinstance(rel, str) or not rel:
+            raise HTTPException(status_code=400, detail="path is required")
+        try:
+            command = await run_in_threadpool(client.shell_run, bot, rel)
+        except HelperError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        audit.record(user.email, "console.run_file", bot, rel)
+        return {"command": command}
+
     # -- environment / secrets (values are never re-displayed, PLAN 3.3) -------
     @app.get("/api/bots/{bot_id}/env")
     async def get_env(
@@ -1698,11 +1718,24 @@ def create_app(config: AppConfig) -> FastAPI:
         _origin: None = Depends(check_origin),
     ) -> None:
         bot = stored.bot_id
+        target = websocket.query_params.get("target", "main")
+        if target not in ("main", "shell"):
+            target = "main"
         await websocket.accept()
-        audit.record(user.email, "console.connect", bot)
+        audit.record(user.email, "console.connect", bot, target)
+        if target == "shell":
+            # The operator shell: created on demand, no log capture to
+            # pause and no history to clear afterwards.
+            with contextlib.suppress(Exception):
+                await run_in_threadpool(client.ensure_shell, bot)
+            try:
+                await _serve_console(websocket, client, bot, target)
+            finally:
+                audit.record(user.email, "console.disconnect", bot, target)
+            return
         await run_in_threadpool(capture.acquire_private, bot)
         try:
-            await _serve_console(websocket, client, bot)
+            await _serve_console(websocket, client, bot, target)
         finally:
             # Cleanup must survive client-disconnect cancellation: shield
             # each step so one cancelled await cannot skip the next step.
@@ -1792,7 +1825,7 @@ async def _tls_rotation_loop(root: Path, audit: AuditLog) -> None:
 
 
 async def _serve_console(
-    websocket: WebSocket, client: HelperClient, bot: str
+    websocket: WebSocket, client: HelperClient, bot: str, session: str = "main"
 ) -> None:
     """Console session: prefer the helper's raw byte stream (a real
     terminal feed, like a hypervisor console); fall back to snapshot
@@ -1814,9 +1847,11 @@ async def _serve_console(
         if size is not None:
             cols, rows = size
             first = None
-    stream = await run_in_threadpool(client.open_console_stream, bot, cols, rows)
+    stream = await run_in_threadpool(
+        client.open_console_stream, bot, cols, rows, session
+    )
     if stream is None:
-        await _serve_console_snapshots(websocket, client, bot, first)
+        await _serve_console_snapshots(websocket, client, bot, first, session)
         return
     try:
         if first is not None:
@@ -1829,7 +1864,7 @@ async def _serve_console(
             # the operator with a dead console.
             await run_in_threadpool(stream.close)
             stream = None
-            await _serve_console_snapshots(websocket, client, bot, None)
+            await _serve_console_snapshots(websocket, client, bot, None, session)
             return
         await _pump_console(websocket, stream, first_frame)
     except WebSocketDisconnect:
@@ -1942,9 +1977,9 @@ def _retrieve_task_error(task: asyncio.Task[None]) -> None:
         task.exception()
 
 
-async def _safe_snapshot(client: HelperClient, bot: str) -> str:
+async def _safe_snapshot(client: HelperClient, bot: str, session: str = "main") -> str:
     try:
-        return await run_in_threadpool(client.console_snapshot, bot)
+        return await run_in_threadpool(client.console_snapshot, bot, session)
     except (HelperError, OSError, RuntimeError):
         return ""
 
@@ -1954,16 +1989,17 @@ async def _serve_console_snapshots(
     client: HelperClient,
     bot: str,
     first: dict[str, Any] | None,
+    session: str = "main",
 ) -> None:
-    snapshot = await _safe_snapshot(client, bot)
+    snapshot = await _safe_snapshot(client, bot, session)
     await websocket.send_text(json.dumps({"type": "screen", "data": snapshot}))
-    sender = asyncio.create_task(_console_sender(websocket, client, bot))
+    sender = asyncio.create_task(_console_sender(websocket, client, bot, session))
     try:
         if first is not None and isinstance(first.get("text"), str):
-            await _handle_console_message(first["text"], client, bot)
+            await _handle_console_message(first["text"], client, bot, session)
         while True:
             message = await websocket.receive_text()
-            await _handle_console_message(message, client, bot)
+            await _handle_console_message(message, client, bot, session)
     except WebSocketDisconnect:
         pass
     finally:
@@ -1972,10 +2008,12 @@ async def _serve_console_snapshots(
             await sender
 
 
-async def _console_sender(websocket: WebSocket, client: HelperClient, bot: str) -> None:
+async def _console_sender(
+    websocket: WebSocket, client: HelperClient, bot: str, session: str = "main"
+) -> None:
     last: str | None = None
     while True:
-        snapshot = await _safe_snapshot(client, bot)
+        snapshot = await _safe_snapshot(client, bot, session)
         if snapshot != last:
             last = snapshot
             await websocket.send_text(json.dumps({"type": "screen", "data": snapshot}))
@@ -1983,7 +2021,7 @@ async def _console_sender(websocket: WebSocket, client: HelperClient, bot: str) 
 
 
 async def _handle_console_message(
-    message: str, client: HelperClient, bot: str
+    message: str, client: HelperClient, bot: str, session: str = "main"
 ) -> None:
     try:
         payload = json.loads(message)
@@ -1996,10 +2034,10 @@ async def _handle_console_message(
         data = payload.get("data")
         if isinstance(data, str) and data:
             if data in ("\r", "\n"):
-                await run_in_threadpool(client.console_send, bot, "", True)
+                await run_in_threadpool(client.console_send, bot, "", True, session)
             else:
-                await run_in_threadpool(client.console_send, bot, data, False)
+                await run_in_threadpool(client.console_send, bot, data, False, session)
     elif kind == "resize":
         cols, rows = payload.get("cols"), payload.get("rows")
         if isinstance(cols, int) and isinstance(rows, int):
-            await run_in_threadpool(client.console_resize, bot, cols, rows)
+            await run_in_threadpool(client.console_resize, bot, cols, rows, session)
