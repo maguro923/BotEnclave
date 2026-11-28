@@ -544,3 +544,36 @@ def test_main_resets_umask_inherited_from_manager(
     assert rc == 1  # the malformed request is rejected, as before
     assert '"ok": false' in capsys.readouterr().out
     assert current == 0o022
+
+
+class _StubProc:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+class _StubExecutor:
+    def __init__(self, results: list[int]) -> None:
+        self._results = list(results)
+
+    def _tmux(self, bot: str, *args: str) -> _StubProc:
+        return _StubProc(self._results.pop(0) if self._results else 0)
+
+
+def test_wait_for_session_until_it_appears() -> None:
+    from botmgr.helperd import _wait_for_session
+
+    executor = _StubExecutor([1, 1, 0])
+    assert (
+        _wait_for_session(executor, "alpha", timeout=5, interval=0.01)  # type: ignore[arg-type]
+        is True
+    )
+
+
+def test_wait_for_session_times_out() -> None:
+    from botmgr.helperd import _wait_for_session
+
+    executor = _StubExecutor([1] * 100)
+    assert (
+        _wait_for_session(executor, "alpha", timeout=0.05, interval=0.01)  # type: ignore[arg-type]
+        is False
+    )

@@ -1169,6 +1169,39 @@ def _set_winsize(fd: int, cols: int, rows: int) -> None:
     )
 
 
+def _session_exists(executor: SystemExecutor, bot: str) -> bool:
+    try:
+        proc = executor._tmux(bot, "has-session", "-t", "main")
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def _wait_for_session(
+    executor: SystemExecutor,
+    bot: str,
+    timeout: float = 30.0,
+    interval: float = 0.25,
+) -> bool:
+    """Wait for the bot's tmux session to appear.
+
+    The console is often opened before the bot is started. Attaching
+    immediately would fail, and tmux's error text would be forwarded
+    as pane output, which the manager mistakes for a healthy stream
+    and never falls back from. Poll instead; the caller gives up
+    quietly when the bot never starts.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if _session_exists(executor, bot):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
+
+
 def run_console_stream(
     executor: SystemExecutor, bot: str, cols: int, rows: int
 ) -> int:
@@ -1187,6 +1220,12 @@ def run_console_stream(
     bot = validate_bot_name(bot)
     cols = min(max(cols, 1), 500)
     rows = min(max(rows, 1), 200)
+    if not _wait_for_session(executor, bot):
+        # No pane to attach to: end without emitting any data, so
+        # the manager degrades to snapshot polling for this console.
+        sys.stdout.write(json.dumps({"type": "exit"}) + "\n")
+        sys.stdout.flush()
+        return 0
     user = username_for(bot)
     inner = shlex.join(
         [

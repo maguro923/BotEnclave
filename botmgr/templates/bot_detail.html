@@ -769,19 +769,33 @@ const logEl = document.getElementById('log');
 // Display-only clear: the log file itself is untouched, and lines
 // written afterwards keep arriving as usual.
 document.getElementById('log-clear').onclick = () => { logEl.textContent = ''; };
-const logWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/log');
-logWs.onmessage = (event) => {
-  const { lines } = JSON.parse(event.data);
-  // Follow the tail only while the reader is at the bottom: scrolling
-  // up to read earlier output must not be yanked back down every time
-  // a new line arrives.
-  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
-  for (const line of lines) {
-    logEl.appendChild(document.createTextNode(line + '\n'));
-  }
-  while (logEl.childNodes.length > 2000) logEl.removeChild(logEl.firstChild);
-  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
-};
+let logRetryMs = 1000;
+function connectLogWs() {
+  const ws = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/log');
+  ws.onopen = () => {
+    logRetryMs = 1000;
+    // The server replays the recent tail on every connect; start
+    // from a clean slate so a reconnect does not duplicate it.
+    logEl.textContent = '';
+  };
+  ws.onmessage = (event) => {
+    const { lines } = JSON.parse(event.data);
+    // Follow the tail only while the reader is at the bottom: scrolling
+    // up to read earlier output must not be yanked back down every time
+    // a new line arrives.
+    const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+    for (const line of lines) {
+      logEl.appendChild(document.createTextNode(line + '\n'));
+    }
+    while (logEl.childNodes.length > 2000) logEl.removeChild(logEl.firstChild);
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  };
+  ws.onclose = () => {
+    setTimeout(connectLogWs, logRetryMs);
+    logRetryMs = Math.min(logRetryMs * 2, 10000);
+  };
+}
+connectLogWs();
 const term = new Terminal({
   convertEol: false,
   fontSize: 13,
@@ -793,38 +807,62 @@ const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open(document.getElementById('terminal'));
 fit.fit();
-const consoleWs = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/console');
-consoleWs.binaryType = 'arraybuffer';
+let consoleWs = null;
+let consoleRetryMs = 1000;
 // Streaming mode (the usual path): the server forwards the pane's
 // raw byte stream, so the terminal behaves like a hypervisor web
 // console — real scrollback, no snapshot redraws. If the server
 // falls back to screen snapshots, it says so with a 'screen' frame
 // and input switches to the legacy JSON form.
 let consoleStreaming = true;
-consoleWs.onopen = () => {
-  consoleWs.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-};
-consoleWs.onmessage = (event) => {
-  if (event.data instanceof ArrayBuffer) {
-    term.write(new Uint8Array(event.data));
-    return;
+function consoleSend(payload) {
+  if (consoleWs && consoleWs.readyState === WebSocket.OPEN) {
+    consoleWs.send(payload);
   }
-  const msg = JSON.parse(event.data);
-  if (msg.type === 'screen') {
-    consoleStreaming = false;
-    term.reset();
-    term.write(msg.data.replace(/\n/g, '\r\n'));
-  }
-};
+}
+function connectConsoleWs() {
+  const ws = new WebSocket(proto + location.host + '/ws/bots/' + botId + '/console');
+  consoleWs = ws;
+  ws.binaryType = 'arraybuffer';
+  let opened = false;
+  ws.onopen = () => {
+    opened = true;
+    consoleRetryMs = 1000;
+    consoleStreaming = true;
+    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  };
+  ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      term.write(new Uint8Array(event.data));
+      return;
+    }
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'screen') {
+      consoleStreaming = false;
+      term.reset();
+      term.write(msg.data.replace(/\n/g, '\r\n'));
+    }
+  };
+  ws.onclose = () => {
+    // The stream behind the socket ended (the bot stopped or
+    // restarted, or the helper gave up waiting for it). Reconnect
+    // with backoff so the console recovers on its own instead of
+    // freezing on the last frame until the page is reloaded.
+    if (opened) term.reset();
+    setTimeout(connectConsoleWs, consoleRetryMs);
+    consoleRetryMs = Math.min(consoleRetryMs * 2, 10000);
+  };
+}
+connectConsoleWs();
 term.onData((data) => {
   if (consoleStreaming) {
-    consoleWs.send(new TextEncoder().encode(data));
+    consoleSend(new TextEncoder().encode(data));
   } else {
-    consoleWs.send(JSON.stringify({ type: 'input', data }));
+    consoleSend(JSON.stringify({ type: 'input', data }));
   }
 });
 term.onResize(({ cols, rows }) => {
-  consoleWs.send(JSON.stringify({ type: 'resize', cols, rows }));
+  consoleSend(JSON.stringify({ type: 'resize', cols, rows }));
 });
 window.addEventListener('resize', () => fit.fit());
 

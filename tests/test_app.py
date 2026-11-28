@@ -462,6 +462,62 @@ def test_console_stream_instant_exit_falls_back_to_snapshots(
     assert stream.closed
 
 
+def test_console_stream_exit_closes_websocket(
+    env: tuple[TestClient, FakeHelper, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream that produces output and then dies mid-session (the
+    bot stopped or restarted and its tmux server went away) must
+    close the websocket, so the client reconnects to a fresh stream
+    instead of staring at a frozen console forever."""
+    import base64
+    import queue as queue_module
+
+    from starlette.websockets import WebSocketDisconnect
+
+    from botmgr.helper import HelperClient
+
+    class DyingStream:
+        def __init__(self) -> None:
+            self.frames: queue_module.Queue[dict[str, Any]] = queue_module.Queue()
+            self.frames.put(
+                {
+                    "type": "data",
+                    "data": base64.b64encode(b"partial-output").decode(),
+                }
+            )
+            self.frames.put({"type": "exit"})
+            self.closed = False
+
+        def send_data(self, data: bytes) -> None:
+            pass
+
+        def send_resize(self, cols: int, rows: int) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = DyingStream()
+    monkeypatch.setattr(
+        HelperClient,
+        "open_console_stream",
+        lambda self, bot, cols, rows: stream,
+    )
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    with admin.websocket_connect("/ws/bots/alpha/console") as ws:
+        ws.send_json({"type": "resize", "cols": 120, "rows": 40})
+        assert ws.receive_bytes() == b"partial-output"
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_bytes()
+    deadline = time.time() + 20
+    while time.time() < deadline and not stream.closed:
+        time.sleep(0.05)
+    assert stream.closed
+
+
 # -- user deletion ----------------------------------------------------------------
 
 

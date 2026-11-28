@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Fixed: the web console froze permanently in several ordinary
+  flows. Opening a bot's page before starting the bot attached the
+  console stream before the tmux session existed; the attach died
+  (its error text was mistaken for pane output) and the console
+  never recovered. A stream that ended mid-session — the bot
+  stopped or restarted — likewise left the websocket open with no
+  more output. The stream helper now waits up to 30 seconds for
+  the session to appear and otherwise ends without emitting data
+  (so the manager degrades to snapshot polling), a stream that
+  ends closes its websocket, and the page reconnects both the
+  console and the log socket with backoff. Snapshot polling also
+  survives transient helper errors instead of freezing.
 - Fixed: installing a Python version on selection failed with
   "uv is not available on this host" when the panel ran under the
   systemd unit, which starts the system interpreter with the

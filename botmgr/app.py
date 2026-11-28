@@ -1773,6 +1773,14 @@ async def _pump_console(
             else:
                 frame = await run_in_threadpool(stream.frames.get)
             if not isinstance(frame, dict) or frame.get("type") == "exit":
+                # The stream ended (the bot stopped or restarted and
+                # its tmux server went away): close the websocket so
+                # the client reconnects to a fresh stream instead of
+                # freezing on the last frame forever. The receive
+                # loop below then sees the disconnect and ends the
+                # session cleanly.
+                with contextlib.suppress(Exception):
+                    await websocket.close()
                 return
             if frame.get("type") == "data":
                 data = frame.get("data")
@@ -1801,8 +1809,23 @@ async def _pump_console(
                     )
     finally:
         sender.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sender
+        # Do not await the sender: it may be blocked in a threadpool
+        # read on the stream's frame queue, which a cancellation
+        # cannot interrupt. Just make sure a failure inside it is
+        # retrieved rather than reported as an unhandled exception.
+        sender.add_done_callback(_retrieve_task_error)
+
+
+def _retrieve_task_error(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _safe_snapshot(client: HelperClient, bot: str) -> str:
+    try:
+        return await run_in_threadpool(client.console_snapshot, bot)
+    except (HelperError, OSError, RuntimeError):
+        return ""
 
 
 async def _serve_console_snapshots(
@@ -1811,7 +1834,7 @@ async def _serve_console_snapshots(
     bot: str,
     first: dict[str, Any] | None,
 ) -> None:
-    snapshot = await run_in_threadpool(client.console_snapshot, bot)
+    snapshot = await _safe_snapshot(client, bot)
     await websocket.send_text(json.dumps({"type": "screen", "data": snapshot}))
     sender = asyncio.create_task(_console_sender(websocket, client, bot))
     try:
@@ -1831,7 +1854,7 @@ async def _serve_console_snapshots(
 async def _console_sender(websocket: WebSocket, client: HelperClient, bot: str) -> None:
     last: str | None = None
     while True:
-        snapshot = await run_in_threadpool(client.console_snapshot, bot)
+        snapshot = await _safe_snapshot(client, bot)
         if snapshot != last:
             last = snapshot
             await websocket.send_text(json.dumps({"type": "screen", "data": snapshot}))
