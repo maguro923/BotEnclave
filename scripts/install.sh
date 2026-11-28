@@ -72,6 +72,10 @@ if ! id "$MANAGER_USER" >/dev/null 2>&1; then
 fi
 mkdir -p "$ROOT"
 chown "$MANAGER_USER" "$ROOT"
+# Managed interpreters live here; the manager (not root) installs
+# them at runtime, so the directory must be manager-owned.
+mkdir -p "$ROOT/pythons"
+chown "$MANAGER_USER" "$ROOT/pythons"
 
 # Existing data is never overwritten; say so when there is any.
 EXISTING=""
