@@ -829,6 +829,10 @@ function connectConsoleWs() {
     opened = true;
     consoleRetryMs = 1000;
     consoleStreaming = true;
+    // Start from a blank terminal: the pane only ever holds the
+    // current run, and the attach repaint (or the snapshot frame)
+    // redraws it; anything left here belongs to a previous run.
+    term.reset();
     ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
   };
   ws.onmessage = (event) => {

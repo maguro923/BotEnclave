@@ -70,7 +70,7 @@ from botmgr.helper_backend import HelperBackend
 from botmgr.helperd import BOT_NAME_RE
 from botmgr.i18n import STRINGS, normalize_language, translator_for
 from botmgr.launcher import LaunchConfig
-from botmgr.logtail import LogFollower, read_tail
+from botmgr.logtail import LogFollower, read_segment
 from botmgr.masking import mask_lines
 from botmgr.pythons import (
     SUPPORTED_VERSIONS,
@@ -686,8 +686,13 @@ def create_app(config: AppConfig) -> FastAPI:
         stored: StoredBot = Depends(bot_access),
     ) -> dict[str, object]:
         path = root / "bots" / stored.bot_id / "logs" / "console.log"
-        tail = await run_in_threadpool(read_tail, path, max(1, min(lines, 2000)))
-        return {"lines": mask_lines(tail, mask_for(stored.bot_id))}
+        segment, _end = await run_in_threadpool(
+            read_segment,
+            path,
+            stored.log_from_offset,
+            max(1, min(lines, 2000)),
+        )
+        return {"lines": mask_lines(segment, mask_for(stored.bot_id))}
 
     # -- environment / secrets (values are never re-displayed, PLAN 3.3) -------
     @app.get("/api/bots/{bot_id}/env")
@@ -1547,10 +1552,16 @@ def create_app(config: AppConfig) -> FastAPI:
     ) -> None:
         await websocket.accept()
         path = root / "bots" / stored.bot_id / "logs" / "console.log"
-        follower = LogFollower(path)
         values = mask_for(stored.bot_id)
         try:
-            initial = await run_in_threadpool(read_tail, path, 200)
+            # Only the latest run is shown: the segment starts where
+            # the most recent start began writing (the file itself
+            # keeps the full history). The follower continues exactly
+            # where the segment read ended, so nothing is shown twice.
+            initial, end = await run_in_threadpool(
+                read_segment, path, stored.log_from_offset, 200
+            )
+            follower = LogFollower(path, start_offset=end)
             await websocket.send_text(
                 json.dumps({"lines": mask_lines(initial, values)})
             )

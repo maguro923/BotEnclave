@@ -74,6 +74,7 @@ _BOT_COLUMN_MIGRATIONS = {
     "restart_policy": "TEXT NOT NULL DEFAULT 'once'",
     "autostart": "INTEGER NOT NULL DEFAULT 0",
     "python_version": "TEXT",
+    "log_from_offset": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
@@ -92,6 +93,7 @@ class StoredBot:
     restart_policy: str = "once"
     autostart: bool = False
     python_version: str | None = None
+    log_from_offset: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,7 @@ def config_from_stored(text: str) -> LaunchConfig:
 class StateStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._root = path.parent
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
@@ -157,7 +160,7 @@ class StateStore:
             row = self._conn.execute(
                 "SELECT owner_id, secret_backend, source_type, git_url_enc,"
                 " git_branch, dotenv_mode, command_override, restart_policy,"
-                " autostart, python_version"
+                " autostart, python_version, log_from_offset"
                 " FROM bots WHERE bot_id = ?",
                 (bot_id,),
             ).fetchone()
@@ -166,14 +169,14 @@ class StateStore:
             preserved = (
                 row[1:]
                 if row
-                else ("systemd-creds", None, None, None, 0, None, "once", 0, None)
+                else ("systemd-creds", None, None, None, 0, None, "once", 0, None, 0)
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at,"
                 " owner_id, secret_backend, source_type, git_url_enc,"
                 " git_branch, dotenv_mode, command_override, restart_policy,"
-                " autostart, python_version)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " autostart, python_version, log_from_offset)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     bot_id,
                     config_to_json(config),
@@ -214,7 +217,8 @@ class StateStore:
                 "SELECT b.bot_id, b.launch_json, s.state, s.pid, s.start_time,"
                 " s.boot_id, b.owner_id, b.secret_backend, b.source_type,"
                 " b.git_branch, b.dotenv_mode, b.command_override,"
-                " b.restart_policy, b.autostart, b.python_version FROM bots b"
+                " b.restart_policy, b.autostart, b.python_version,"
+                " b.log_from_offset FROM bots b"
                 " LEFT JOIN bot_state s ON s.bot_id = b.bot_id ORDER BY b.bot_id"
             ).fetchall()
         result: list[StoredBot] = []
@@ -235,6 +239,7 @@ class StateStore:
                 restart_policy,
                 autostart,
                 python_version,
+                log_from_offset,
             ) = row
             identity = None
             if pid is not None and start_time is not None and boot_id is not None:
@@ -260,6 +265,7 @@ class StateStore:
                     restart_policy=restart_policy or "once",
                     autostart=bool(autostart),
                     python_version=python_version,
+                    log_from_offset=log_from_offset or 0,
                 )
             )
         return result
@@ -305,6 +311,25 @@ class StateStore:
                 (version, bot_id),
             )
             self._conn.commit()
+
+    def set_log_from_offset(self, bot_id: str, offset: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET log_from_offset = ? WHERE bot_id = ?",
+                (offset, bot_id),
+            )
+            self._conn.commit()
+
+    def note_log_start(self, bot_id: str) -> None:
+        """Record where the current run's log output begins: the log
+        views show only what was written from the latest start, while
+        the file itself keeps the full history."""
+        path = self._root / "bots" / bot_id / "logs" / "console.log"
+        try:
+            offset = path.stat().st_size
+        except OSError:
+            offset = 0
+        self.set_log_from_offset(bot_id, offset)
 
     def set_owner(self, bot_id: str, owner_id: int | None) -> None:
         with self._lock:

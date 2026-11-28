@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from botmgr.logfiles import rotate_copytruncate
-from botmgr.logtail import MAX_LINE_BYTES, LogFollower, decode_line, read_tail
+from botmgr.logtail import (
+    MAX_LINE_BYTES,
+    LogFollower,
+    decode_line,
+    read_segment,
+    read_tail,
+)
 
 
 def test_follower_reads_new_lines(tmp_path: Path) -> None:
@@ -131,3 +137,55 @@ def test_read_tail_newline_free_file_over_window(tmp_path: Path) -> None:
     assert len(lines) == 1
     assert lines[0].endswith(" [truncated]")
     assert set(lines[0][:100]) == {"x"}
+
+
+def test_read_segment_returns_only_lines_from_the_offset(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "console.log"
+    old = b"old one\nold two\n"
+    log.write_bytes(old + b"new one\nnew two\n")
+    lines, end = read_segment(log, len(old), 200)
+    assert lines == ["new one", "new two"]
+    assert end == log.stat().st_size
+
+
+def test_read_segment_mid_line_offset_skips_the_partial_line(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "console.log"
+    log.write_bytes(b"partial-line\nwhole\n")
+    lines, _end = read_segment(log, 4, 200)
+    assert lines == ["whole"]
+
+
+def test_read_segment_offset_past_end_reads_the_whole_file(
+    tmp_path: Path,
+) -> None:
+    # The offset was recorded before a copytruncate rotation emptied
+    # the file: everything in the fresh file is the current run.
+    log = tmp_path / "console.log"
+    log.write_bytes(b"fresh\n")
+    lines, _end = read_segment(log, 5000, 200)
+    assert lines == ["fresh"]
+
+
+def test_read_segment_caps_at_max_lines(tmp_path: Path) -> None:
+    log = tmp_path / "console.log"
+    log.write_bytes(b"a\nb\nc\nd\n")
+    lines, _end = read_segment(log, 0, 2)
+    assert lines == ["c", "d"]
+
+
+def test_follower_with_start_offset_skips_existing_content(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "console.log"
+    existing = b"first\nsecond\n"
+    log.write_bytes(existing)
+    follower = LogFollower(log, start_offset=len(existing))
+    assert follower.poll() == []
+    with open(log, "a") as fh:
+        fh.write("third\n")
+    assert follower.poll() == ["third"]
+    follower.close()

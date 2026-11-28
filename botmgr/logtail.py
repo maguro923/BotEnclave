@@ -30,12 +30,13 @@ def decode_line(raw: bytes) -> str:
 class LogFollower:
     """Follows one log file across copytruncate rotation and replacement."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, start_offset: int | None = None) -> None:
         self._path = path
         self._fh: object | None = None
         self._inode: int | None = None
         self._buffer = b""
         self._discarding = False
+        self._start_offset = start_offset
 
     def _open(self) -> bool:
         try:
@@ -47,6 +48,14 @@ class LogFollower:
             self._inode = os.fstat(fh.fileno()).st_ino
         except OSError:
             self._inode = None
+        if self._start_offset is not None:
+            # Only the first open honors the offset (a rotation reopen
+            # starts the replacement file from its beginning).
+            try:
+                fh.seek(min(self._start_offset, os.fstat(fh.fileno()).st_size))
+            except OSError:
+                pass
+            self._start_offset = None
         self._buffer = b""
         self._discarding = False
         return True
@@ -105,6 +114,45 @@ class LogFollower:
         if self._fh is not None:
             self._fh.close()  # type: ignore[attr-defined]
             self._fh = None
+
+
+def read_segment(
+    path: Path, from_offset: int, max_lines: int
+) -> tuple[list[str], int]:
+    """Return the last ``max_lines`` lines at or after ``from_offset``,
+    plus the file size when read (where a follower should continue).
+
+    An offset past the end (the file was copytruncate-rotated after the
+    offset was recorded) falls back to the whole file: everything in a
+    freshly truncated file belongs to the current run.
+    """
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as fh:
+            start = from_offset if 0 <= from_offset <= size else 0
+            seeked = False
+            if start > 0:
+                fh.seek(start - 1)
+                if fh.read(1) != b"\n":
+                    # The offset lands mid-line: skip the partial line.
+                    fh.readline()
+                    start = fh.tell()
+            if size - start > _READ_CHUNK * 16:
+                # Same bounded window as read_tail: only the newest
+                # lines of the segment are ever displayed.
+                start = size - _READ_CHUNK * 16
+                seeked = True
+            fh.seek(start)
+            data = fh.read()
+            end = fh.tell()
+    except OSError:
+        return [], 0
+    parts = data.split(b"\n")
+    if seeked and len(parts) > 1:
+        parts = parts[1:]
+    if parts and parts[-1] == b"":
+        parts.pop()
+    return [decode_line(part) for part in parts[-max_lines:]], end
 
 
 def read_tail(path: Path, max_lines: int) -> list[str]:

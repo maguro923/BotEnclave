@@ -8,6 +8,7 @@ exit polling deterministically.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import threading
 import time
@@ -160,6 +161,12 @@ class Supervisor:
                 entry.machine.mark_secret_pending(self._now())
                 raise SecretPendingError(bot_id)
             entry.machine.start(self._now())
+            if self._store is not None:
+                # The log views show only the run that is starting now;
+                # recording the offset is display bookkeeping and must
+                # never block the start itself.
+                with contextlib.suppress(Exception):
+                    self._store.note_log_start(bot_id)
             self._spawn(bot_id, entry, resolution)
         finally:
             self._persist(bot_id, entry)

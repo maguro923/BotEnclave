@@ -1511,3 +1511,28 @@ def test_python_version_put_installs_a_missing_interpreter(
     assert resp.status_code == 502
     stored = store.get_bot("alpha")
     assert stored is not None and stored.python_version == target  # unchanged
+
+
+def test_log_views_show_only_the_latest_run(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    import json
+
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    log_dir = root / "bots" / "alpha" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    old = b"[2026-11-28 10:00:00] old run line\n"
+    new_line = "[2026-11-28 11:00:00] new run line"
+    (log_dir / "console.log").write_bytes(
+        old + (new_line + "\n").encode()
+    )
+    store = client.app.state.store  # type: ignore[attr-defined]
+    store.set_log_from_offset("alpha", len(old))
+    resp = admin.get("/api/bots/alpha/log")
+    assert resp.status_code == 200
+    assert resp.json()["lines"] == [new_line]
+    with admin.websocket_connect("/ws/bots/alpha/log") as ws:
+        first = json.loads(ws.receive_text())
+    assert first["lines"] == [new_line]

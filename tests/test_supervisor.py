@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from botmgr.launcher import LaunchConfig
@@ -183,3 +185,25 @@ def test_unregister_allows_name_reuse_and_stops_polling() -> None:
     sup.register("alpha", CONFIG)  # the name is free again
     assert sup.bot_ids() == ["alpha"]
     sup.unregister("missing")  # unknown name: no-op, no error
+
+
+def test_start_records_log_display_offset(tmp_path: Path) -> None:
+    from botmgr.store import StateStore
+
+    store = StateStore(tmp_path / "botmgr.db")
+    backend = FakeBackend()
+    sup = Supervisor(backend, now_fn=FakeClock(), store=store)
+    sup.register("alpha", CONFIG)
+    log = tmp_path / "bots" / "alpha" / "logs" / "console.log"
+    log.parent.mkdir(parents=True)
+    previous = b"previous run\n"
+    log.write_bytes(previous)
+    sup.start("alpha")
+    stored = store.get_bot("alpha")
+    assert stored is not None
+    assert stored.log_from_offset == len(previous)
+    # Re-registration (deploys, reconcile) must not reset the offset.
+    store.register_bot("alpha", CONFIG)
+    stored = store.get_bot("alpha")
+    assert stored is not None
+    assert stored.log_from_offset == len(previous)
