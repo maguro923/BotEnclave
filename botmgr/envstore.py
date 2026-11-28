@@ -12,19 +12,17 @@ erased when the backend changes):
   Fernet-encrypted into ``secrets/<bot>.env.enc`` with the manager's key
   file. The manager decrypts at start and passes values through the same
   one-shot FIFO.
-- ``memory``: nothing is written to disk. Values live in this process
-  only; after a manager restart the bot resolves as secret-pending until
-  the owner re-enters them.
 
 Saved values are never re-displayed: the service exposes key names and
-the backend only. A SHA-256 of a DISCORD_TOKEN (never the token itself)
-is kept in the store's token registry so the same token registered to
-two bots can be warned about across backends.
+the backend only. A keyed, iterated HMAC-SHA-256 fingerprint of a
+DISCORD_TOKEN (never the token itself) is kept in the store's token
+registry so the same token registered to two bots can be warned about
+across backends; the fingerprint key lives in ``secrets/token-hash.key``
+(0600), separate from the database that holds the fingerprints.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import shutil
@@ -36,10 +34,16 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from botmgr.launcher import format_env_text, parse_env_text
-from botmgr.secrets import decrypt_text, encrypt_text, load_or_create_fernet
+from botmgr.secrets import (
+    decrypt_text,
+    encrypt_text,
+    load_or_create_fernet,
+    load_or_create_token_key,
+    token_fingerprint,
+)
 from botmgr.store import StateStore
 
-BACKENDS = ("systemd-creds", "fernet", "memory")
+BACKENDS = ("systemd-creds", "fernet")
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TOKEN_KEY = "DISCORD_TOKEN"
 
@@ -71,8 +75,8 @@ class SecretsService:
         self._dir = root / "secrets"
         self._dir.mkdir(parents=True, exist_ok=True)
         self._dir.chmod(0o700)
-        self._memory: dict[str, dict[str, str]] = {}
         self._fernet: Fernet | None = None  # lazy: fernet bots only
+        self._token_key: bytes | None = None  # lazy: token saves only
 
     # -- paths ------------------------------------------------------------
     def _cred_path(self, bot: str) -> Path:
@@ -88,6 +92,12 @@ class SecretsService:
         if self._fernet is None:
             self._fernet = load_or_create_fernet(self._root)
         return self._fernet
+
+    def fingerprint(self, token: str) -> str:
+        """The registry fingerprint for a DISCORD_TOKEN value."""
+        if self._token_key is None:
+            self._token_key = load_or_create_token_key(self._dir)
+        return token_fingerprint(self._token_key, token)
 
     # -- metadata -----------------------------------------------------------
     def keys(self, bot: str) -> list[str]:
@@ -125,12 +135,10 @@ class SecretsService:
         text = format_env_text(env)
         if backend == "systemd-creds":
             self._write_credential(bot, text)
-        elif backend == "fernet":
+        else:
             path = self._enc_path(bot)
             path.write_text(encrypt_text(self._fernet_or_create(), text), encoding="ascii")
             path.chmod(0o600)
-        else:
-            self._memory[bot] = dict(env)
         self._write_meta(bot, sorted(env))
         # Point the store at the new backend BEFORE erasing the old
         # artifact: until this commit, resolve() still uses the old
@@ -144,12 +152,10 @@ class SecretsService:
             self._cred_path(bot).unlink(missing_ok=True)
         if backend != "fernet":
             self._enc_path(bot).unlink(missing_ok=True)
-        if backend != "memory":
-            self._memory.pop(bot, None)
         token = env.get(TOKEN_KEY)
         self._store.set_token_hash(
             bot,
-            hashlib.sha256(token.encode()).hexdigest() if token else None,
+            self.fingerprint(token) if token else None,
         )
 
     def _write_credential(self, bot: str, text: str) -> None:
@@ -199,8 +205,82 @@ class SecretsService:
         self._cred_path(bot).unlink(missing_ok=True)
         self._enc_path(bot).unlink(missing_ok=True)
         self._meta_path(bot).unlink(missing_ok=True)
-        self._memory.pop(bot, None)
         self._store.set_token_hash(bot, None)
+
+    def remove_key(self, bot: str, key: str) -> list[str]:
+        """Remove one key from a bot's stored environment and return the
+        remaining key names. For systemd-creds the surgery happens in
+        the privileged helper, so plaintext never reaches the manager;
+        the helper returns key names only."""
+        if not _ENV_KEY_RE.match(key):
+            raise SecretsError(f"invalid environment variable name: {key!r}")
+        if key not in self.keys(bot):
+            raise SecretsError(f"no such key for bot {bot}: {key}")
+        backend = self.backend(bot)
+        if backend == "systemd-creds":
+            remaining = self._remove_credential_key(bot, key)
+        elif backend == "fernet":
+            path = self._enc_path(bot)
+            if not path.exists():
+                raise SecretsError(f"secrets for bot {bot} are unavailable")
+            env = parse_env_text(
+                decrypt_text(self._fernet_or_create(), path.read_text(encoding="ascii"))
+            )
+            env.pop(key, None)
+            if env:
+                path.write_text(
+                    encrypt_text(self._fernet_or_create(), format_env_text(env)),
+                    encoding="ascii",
+                )
+                path.chmod(0o600)
+            else:
+                path.unlink(missing_ok=True)
+            remaining = sorted(env)
+        else:
+            # A backend this build no longer supports (e.g. a bot saved
+            # by an older version): its values are unreachable, so there
+            # is nothing safe to edit in place.
+            raise SecretsError(
+                f"environment for bot {bot} uses an unsupported backend;"
+                " save it again to make it editable"
+            )
+        self._write_meta(bot, remaining)
+        if key == TOKEN_KEY:
+            self._store.set_token_hash(bot, None)
+        return remaining
+
+    def _remove_credential_key(self, bot: str, key: str) -> list[str]:
+        if self._client is not None:
+            remove = getattr(self._client, "remove_credential_key", None)
+            if remove is not None:
+                try:
+                    return list(remove(bot, key))
+                except Exception as exc:  # noqa: BLE001 - surface as a secrets error
+                    raise SecretsError(str(exc)) from None
+        # No helper client (a root CLI run): do the same surgery with a
+        # local systemd-creds call, mirroring _write_credential.
+        binary = shutil.which("systemd-creds")
+        if binary is None:
+            raise SecretsError("systemd-creds is not available on this host")
+        cred = self._cred_path(bot)
+        if not cred.exists():
+            raise SecretsError(f"no credential stored for bot {bot}")
+        proc = subprocess.run(
+            [binary, "decrypt", f"--name=botmgr-{bot}", str(cred), "-"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise SecretsError(f"systemd-creds decrypt failed: {proc.stderr.strip()}")
+        env = parse_env_text(proc.stdout)
+        env.pop(key, None)
+        if env:
+            self._write_credential(bot, format_env_text(env))
+        else:
+            cred.unlink(missing_ok=True)
+        return sorted(env)
 
     # -- reads ----------------------------------------------------------------
     def resolve(self, bot: str) -> EnvResolution:
@@ -215,9 +295,9 @@ class SecretsService:
                     return EnvResolution(env=None, dotenv_mode=dotenv)
                 return EnvResolution(env={}, dotenv_mode=dotenv)
             return EnvResolution(env={}, use_credential=True, dotenv_mode=dotenv)
-        if backend == "memory":
-            if bot in self._memory:
-                return EnvResolution(env=dict(self._memory[bot]), dotenv_mode=dotenv)
+        if backend != "fernet":
+            # A backend this build no longer supports: never start with
+            # a guessed environment.
             if self.keys(bot):
                 return EnvResolution(env=None, dotenv_mode=dotenv)
             return EnvResolution(env={}, dotenv_mode=dotenv)

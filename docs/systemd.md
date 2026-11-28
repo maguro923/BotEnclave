@@ -60,7 +60,7 @@ edit the `ExecStart` line). In this mode:
 **Secret backend requirement:** through a unit, secrets can only be
 delivered by `LoadCredentialEncrypted`, so the bot must use the
 **systemd-creds** backend. Starting a bot whose environment is stored
-with the Fernet or memory backend is refused with an explanation —
+with the Fernet backend is refused with an explanation —
 writing those values into `launch.json` would put plaintext secrets on
 disk. Switch the backend in the bot's Environment section first.
 

@@ -62,6 +62,12 @@ class HelperClient:
     def store_credential(self, bot: str, text: str) -> None:
         self._call({"op": "store_credential", "bot": bot, "text": text})
 
+    def remove_credential_key(self, bot: str, key: str) -> list[str]:
+        result = self._call(
+            {"op": "remove_credential_key", "bot": bot, "key": key}
+        )
+        return [str(k) for k in result["keys"]]
+
     def start_bot(self, bot: str, config: LaunchConfig) -> ProcessIdentity:
         launch: dict[str, Any] = {
             "command": list(config.command),

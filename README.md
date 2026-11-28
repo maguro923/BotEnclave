@@ -110,7 +110,18 @@ Chosen per bot in the Environment section:
 |---|---|---|
 | systemd-creds (standard) | `.env` encrypted with the host key | Decrypted by the helper at start, or by PID 1 under systemd units. Bound to the host: cannot be decrypted after a host migration. |
 | Fernet | `.env` encrypted with the manager's key file | Fallback for non-systemd hosts. Weaker: whoever takes both the key file and the store can decrypt. |
-| Memory only | Nothing on disk | Values are lost when the manager restarts; the bot waits in `secret-pending` until they are re-entered. |
+
+Individual keys can be deleted after saving. For systemd-creds the
+deletion is performed inside the privileged helper, so values never
+reach the manager.
+
+When a `DISCORD_TOKEN` is saved, only a fingerprint of it is kept (in
+the token registry) so a warning can be shown if the same token is
+registered to two bots. The fingerprint is an iterated HMAC-SHA-256
+keyed with a server-side secret stored in `secrets/token-hash.key`
+(mode 600), separate from the database that holds the fingerprints —
+a database copy alone cannot be used to test candidate tokens against
+the registry.
 
 A dotenv compatibility mode (writing the values to `data/.env` at
 start) exists for bots that cannot read environment variables; it is

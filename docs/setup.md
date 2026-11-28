@@ -295,7 +295,7 @@ mirrored to the journal), and each bot's own output is under
 |---|---|
 | Manager exits with “already running” | Another `botmgr serve` holds the lock on this root, or a previous one is still alive. Check `pgrep -af botmgr` before assuming a stale lock. |
 | Bot fails to start with permission errors | The package directory or a release/venv is not readable/executable by the bot's OS user. Reinstall into a world-readable location (see [§2](#2-automated-setup-recommended)); do not `chmod` a private home directory open as a workaround. |
-| Bot sits in `secret-pending` | Its environment values are not resolvable: the memory-only backend lost them on manager restart (re-enter them), or the bot runs under a systemd unit with a non-systemd-creds backend (switch the backend in the Environment section). |
+| Bot sits in `secret-pending` | Its environment values are not resolvable: the stored secrets artifact is missing or the bot uses an unsupported backend (re-enter them in the Environment section), or the bot runs under a systemd unit with a non-systemd-creds backend (switch the backend in the Environment section). |
 | Login page loops back after signing in | Cookie not being sent: you are on plain HTTP with `Secure` cookies. Use HTTPS / a proxy (§6), or `--no-cookie-secure` for local development only. |
 | Deploy rejects a zip | It contains absolute paths, `..` entries or symlinks, or exceeds the size limit. Repack with plain relative file paths. |
 | Deploy cannot use a git URL | Only `https`, `ssh` and `git@` URLs are accepted, and local file transport is disabled by design. Mirror the repository to a reachable remote. |

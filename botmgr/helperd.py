@@ -105,6 +105,7 @@ class Executor(Protocol):
     def delete_user(self, bot: str) -> None: ...
     def delete_bot_files(self, bot: str) -> None: ...
     def store_credential(self, bot: str, text: str) -> None: ...
+    def remove_credential_key(self, bot: str, key: str) -> list[str]: ...
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity: ...
     def stop_bot(self, bot: str, identity: ProcessIdentity, grace: float) -> int: ...
     def bot_status(
@@ -189,6 +190,14 @@ class Helper:
                 raise RequestError("bad_request", "invalid credential text")
             self.executor.store_credential(bot, text)
             return {"stored": bot}
+        if op == "remove_credential_key":
+            _reject_unknown_keys(request, {"op", "bot", "key"})
+            bot = validate_bot_name(request.get("bot"))
+            key = request.get("key")
+            if not isinstance(key, str) or not key or len(key) > 128 or "\x00" in key:
+                raise RequestError("bad_request", "invalid key")
+            keys = self.executor.remove_credential_key(bot, key)
+            return {"keys": keys}
         if op == "start_bot":
             _reject_unknown_keys(request, {"op", "bot", "launch"})
             bot = validate_bot_name(request.get("bot"))
@@ -699,6 +708,19 @@ class SystemExecutor:
             return int(text)
         except ValueError:
             return None
+
+    def remove_credential_key(self, bot: str, key: str) -> list[str]:
+        """Remove one key from a bot's credential, as root, and return
+        the remaining key names. The manager never sees the values:
+        decryption, editing and re-encryption all happen here. Removing
+        the last key removes the credential itself."""
+        env = self._credential_env(bot)
+        env.pop(key, None)
+        if env:
+            self.store_credential(bot, format_env_text(env))
+        else:
+            (self.root / "secrets" / f"{bot}.cred").unlink(missing_ok=True)
+        return sorted(env)
 
     def _credential_env(self, bot: str) -> dict[str, str]:
         """Decrypt this bot's systemd-creds credential (root only) and

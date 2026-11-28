@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
-import hashlib
 import hmac
 import json
 import logging
@@ -727,7 +726,7 @@ def create_app(config: AppConfig) -> FastAPI:
         token = env.get("DISCORD_TOKEN")
         bot_identity: dict[str, str] | None = None
         if token:
-            digest = hashlib.sha256(token.encode()).hexdigest()
+            digest = secrets_service.fingerprint(token)
             other = store.token_hash_owner(digest)
             if other is not None and other != bot:
                 warnings.append(
@@ -747,6 +746,24 @@ def create_app(config: AppConfig) -> FastAPI:
             f"backend={backend} keys={len(env)}",
         )
         return {"status": "ok", "warnings": warnings, "bot_identity": bot_identity}
+
+    @app.delete("/api/bots/{bot_id}/env/{key}")
+    async def delete_env_key(
+        key: str,
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        if key not in secrets_service.keys(bot):
+            raise HTTPException(status_code=404, detail="no such key")
+        try:
+            remaining = await run_in_threadpool(
+                secrets_service.remove_key, bot, key
+            )
+        except SecretsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        audit.record(user.email, "env.remove_key", bot, f"key={key}")
+        return {"status": "ok", "keys": remaining}
 
     @app.post("/api/bots/{bot_id}/dotenv-mode")
     async def set_dotenv_mode(

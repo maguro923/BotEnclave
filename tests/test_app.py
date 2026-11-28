@@ -71,6 +71,18 @@ class FakeHelper:
                 "fake-credential", encoding="utf-8"
             )
             result = {"stored": bot}
+        elif op == "remove_credential_key":
+            import json as _json
+
+            meta = self.root / "secrets" / f"{bot}.meta.json"
+            keys: list[str] = []
+            if meta.exists():
+                keys = [
+                    k
+                    for k in _json.loads(meta.read_text(encoding="utf-8"))["keys"]
+                    if k != request["key"]
+                ]
+            result = {"keys": keys}
         elif op == "ensure_layout":
             for sub in ("releases", "venvs"):
                 (self._bot_root(bot) / sub).mkdir(parents=True, exist_ok=True)
@@ -625,7 +637,9 @@ def test_env_api_secrecy_and_spawn_merge(
     assert "DISCORD_TOKEN" not in stored.config.env
 
 
-def test_memory_backend_secret_pending_after_restart(tmp_path: Path) -> None:
+def test_secret_pending_after_restart_when_artifact_missing(
+    tmp_path: Path,
+) -> None:
     def build() -> tuple[TestClient, FakeHelper]:
         fake = FakeHelper(tmp_path)
         app = create_app(
@@ -652,12 +666,16 @@ def test_memory_backend_secret_pending_after_restart(tmp_path: Path) -> None:
         create_bot(admin1, "beta")
         resp = admin1.put(
             "/api/bots/beta/env",
-            json={"env": {"DISCORD_TOKEN": "tok"}, "backend": "memory"},
+            json={"env": {"DISCORD_TOKEN": "tok"}, "backend": "fernet"},
         )
         assert resp.status_code == 200, resp.text
         assert admin1.post("/api/bots/beta/start").status_code == 200
         assert fake1.launches["beta"]["env"]["DISCORD_TOKEN"] == "tok"
         admin1.post("/api/bots/beta/stop")
+        # The stored secrets artifact disappears (disk loss, manual
+        # cleanup): after a manager restart the bot must wait as
+        # secret-pending instead of starting with an empty environment.
+        (tmp_path / "secrets" / "beta.env.enc").unlink()
 
     client2, _fake2 = build()
     with client2:
@@ -1536,3 +1554,28 @@ def test_log_views_show_only_the_latest_run(
     with admin.websocket_connect("/ws/bots/alpha/log") as ws:
         first = json.loads(ws.receive_text())
     assert first["lines"] == [new_line]
+
+
+def test_env_key_deletion(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    resp = admin.put(
+        "/api/bots/alpha/env",
+        json={
+            "env": {"DISCORD_TOKEN": "tok", "OTHER": "x"},
+            "backend": "fernet",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    resp = admin.delete("/api/bots/alpha/env/OTHER")
+    assert resp.status_code == 200
+    assert resp.json()["keys"] == ["DISCORD_TOKEN"]
+    assert admin.get("/api/bots/alpha/env").json()["keys"] == ["DISCORD_TOKEN"]
+    # Deleting a key that is not there is a 404, and the token key can
+    # be deleted like any other.
+    assert admin.delete("/api/bots/alpha/env/OTHER").status_code == 404
+    assert admin.delete("/api/bots/alpha/env/DISCORD_TOKEN").status_code == 200
+    assert admin.get("/api/bots/alpha/env").json()["keys"] == []

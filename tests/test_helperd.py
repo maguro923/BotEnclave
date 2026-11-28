@@ -25,6 +25,10 @@ class FakeExecutor:
     def store_credential(self, bot: str, text: str) -> None:
         self.calls.append(("store_credential", (bot, text)))
 
+    def remove_credential_key(self, bot: str, key: str) -> list[str]:
+        self.calls.append(("remove_credential_key", (bot, key)))
+        return ["OTHER"]
+
     def start_bot(self, bot: str, launch: dict[str, object]) -> ProcessIdentity:
         self.calls.append(("start_bot", (bot, launch)))
         return IDENT
@@ -515,6 +519,20 @@ def test_store_credential_dispatches(helper: tuple[Helper, FakeExecutor]) -> Non
     assert resp["ok"] is True
     assert fake.calls == [("store_credential", ("alpha", "A=1\n"))]
     bad = h.handle({"op": "store_credential", "bot": "alpha", "text": 3})
+    assert bad["ok"] is False
+
+
+def test_remove_credential_key_dispatches(
+    helper: tuple[Helper, FakeExecutor],
+) -> None:
+    h, fake = helper
+    resp = h.handle(
+        {"op": "remove_credential_key", "bot": "alpha", "key": "DISCORD_TOKEN"}
+    )
+    assert resp["ok"] is True
+    assert resp["result"] == {"keys": ["OTHER"]}
+    assert fake.calls == [("remove_credential_key", ("alpha", "DISCORD_TOKEN"))]
+    bad = h.handle({"op": "remove_credential_key", "bot": "alpha", "key": 3})
     assert bad["ok"] is False
 
 

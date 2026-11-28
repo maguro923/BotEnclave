@@ -158,14 +158,14 @@
 <div class="card">
   <h2>{{ t('bot.env') }}</h2>
   <p class="muted">{{ t('bot.env_note') }} <strong id="env-backend-label"></strong></p>
-  <p>{{ t('bot.env_keys') }} <span id="env-keys"></span></p>
+  <p>{{ t('bot.env_keys') }}</p>
+  <div id="env-keys"></div>
   <form id="env-form">
     <p><textarea id="env-text" rows="6" style="width: 100%;" placeholder="DISCORD_TOKEN=...&#10;OTHER_KEY=value"></textarea></p>
     <label>{{ t('bot.backend') }}
       <select id="env-backend">
         <option value="systemd-creds">{{ t('bot.backend_systemd') }}</option>
         <option value="fernet">{{ t('bot.backend_fernet') }}</option>
-        <option value="memory">{{ t('bot.backend_memory') }}</option>
       </select>
     </label>
     <button type="submit">{{ t('bot.env_save') }}</button>
@@ -401,7 +401,27 @@ async function loadEnv() {
   const data = await resp.json();
   $('env-backend-label').textContent = data.backend;
   $('env-backend').value = data.backend;
-  $('env-keys').textContent = data.keys.length ? data.keys.join(', ') : window.t('bot.env_none');
+  const box = $('env-keys');
+  box.textContent = '';
+  if (!data.keys.length) box.textContent = window.t('bot.env_none');
+  for (const key of data.keys) {
+    const row = document.createElement('p');
+    const label = document.createElement('code');
+    label.textContent = key;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'secondary';
+    btn.textContent = window.t('bot.env_delete');
+    btn.onclick = async () => {
+      if (!confirm(window.t('bot.env_delete_confirm').replace('{key}', key))) return;
+      const r = await apiFetch('/api/bots/' + botId + '/env/' + encodeURIComponent(key), { method: 'DELETE' });
+      if (!r.ok) { showResult($('env-result'), window.t('bot.failed').replace('{detail}', r.status)); return; }
+      showResult($('env-result'), window.t('bot.env_deleted'));
+      loadEnv();
+    };
+    row.append(label, document.createTextNode(' '), btn);
+    box.appendChild(row);
+  }
   $('dotenv-mode').checked = !!data.dotenv_mode;
   $('dotenv-warning').hidden = !data.dotenv_mode;
 }

@@ -77,8 +77,9 @@ plus `crashed`, `backoff`, `degraded`, `attention`, and
   unknown, so there is no blind retry — autostart is the explicit way
   to bring it back); log capture that fell off is re-attached.
 - `secret-pending` is not a failure: it means the bot's secrets are
-  unavailable to this manager process (memory-only backend after a
-  restart) and the bot waits for its owner to re-enter them.
+  unavailable to this manager process (the stored artifact is missing,
+  or the bot still uses a backend this build no longer supports) and
+  the bot waits for its owner to re-enter them.
 
 ## Data layout and permissions
 
@@ -143,8 +144,12 @@ leak through `/proc` and `show-environment`); never into the bot
 registry database, the audit log, or deploy logs (credential-bearing
 URLs are redacted); never re-displayed after saving. The Discord
 token, when present, is verified against the Discord API at save time
-and a SHA-256 registry warns when the same token is registered to two
-bots.
+and a token registry warns when the same token is registered to two
+bots. The registry stores only an iterated HMAC-SHA-256 fingerprint of
+the token, keyed with a server-side secret kept in
+`secrets/token-hash.key` (mode 600) — separate from the database — so
+a database copy alone cannot be used to test candidate tokens against
+it.
 
 **Inputs and files.** Zip extraction rejects traversal, absolute
 paths, symlinks, and size bombs, in a worker process. Git clones are
