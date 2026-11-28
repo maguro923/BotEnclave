@@ -144,6 +144,8 @@ def test_install_python_runs_uv_hermetically(
     assert seen["cwd"] == str(root)
     env = seen["env"]
     assert isinstance(env, dict) and env.get("UV_NO_CONFIG") == "1"
+    cache = env.get("UV_CACHE_DIR")
+    assert isinstance(cache, str) and cache.endswith(f"uv-{os.geteuid()}")
 
 
 def test_install_python_failures(

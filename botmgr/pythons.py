@@ -170,7 +170,10 @@ def install_python(version: str, root: Path) -> str:
     env = {
         **os.environ,
         "HOME": str(root),
-        "UV_CACHE_DIR": str(root / ".cache" / "uv"),
+        # Keyed by euid: a cache populated by a root-run CLI install
+        # must not leave root-owned files the service user cannot
+        # write, and vice versa.
+        "UV_CACHE_DIR": str(root / ".cache" / f"uv-{os.geteuid()}"),
         # Hermetic: uv otherwise discovers a uv.toml from the
         # working directory upward, which both surprises and can
         # fail outright when that tree is not readable by the
