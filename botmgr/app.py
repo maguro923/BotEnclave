@@ -221,6 +221,18 @@ def create_app(config: AppConfig) -> FastAPI:
         usage_sink=lambda bot, n: usage.__setitem__(bot, n),
     )
     audit = AuditLog(root / "audit.log", mirror=AuditMirror(root / "botmgr.db"))
+
+    async def refresh_usage(bot: str) -> None:
+        """Re-measure a bot's disk usage after an action that changed
+        its files (start, stop, deploy, upload, file edits). Between
+        actions the status endpoint serves the last measurement and
+        the watchdog re-measures only hourly, so an idle panel costs
+        no tree walks."""
+        try:
+            usage[bot] = await run_in_threadpool(client.disk_usage, bot)
+        except Exception:  # noqa: BLE001, S110 - usage is advisory only
+            pass
+
     deploy_service = DeployService(root, store, supervisor, client)
     webhook_secrets = WebhookSecrets(root)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -684,6 +696,7 @@ def create_app(config: AppConfig) -> FastAPI:
             audit.record(user.email, "bot.start.secret_pending", stored.bot_id)
             return {"state": "secret-pending"}
         audit.record(user.email, "bot.start", stored.bot_id)
+        await refresh_usage(stored.bot_id)
         return {"state": supervisor.state(stored.bot_id).value}
 
     @app.post("/api/bots/{bot_id}/stop")
@@ -696,6 +709,7 @@ def create_app(config: AppConfig) -> FastAPI:
         except BusyError:
             raise HTTPException(status_code=409, detail="operation in progress") from None
         audit.record(user.email, "bot.stop", stored.bot_id)
+        await refresh_usage(stored.bot_id)
         return {"state": supervisor.state(stored.bot_id).value}
 
     @app.get("/api/bots/{bot_id}/log")
@@ -851,6 +865,7 @@ def create_app(config: AppConfig) -> FastAPI:
             audit.record(user.email, "deploy.git.failed", bot, _safe_detail(exc))
             raise HTTPException(status_code=400, detail=str(exc)) from None
         audit.record(user.email, "deploy.git", bot, f"release={result.release_id}")
+        await refresh_usage(bot)
         return {
             "release_id": result.release_id,
             "entry": result.entry,
@@ -887,6 +902,7 @@ def create_app(config: AppConfig) -> FastAPI:
         finally:
             tmp_path.unlink(missing_ok=True)
         audit.record(user.email, "deploy.upload", bot, f"release={result.release_id}")
+        await refresh_usage(bot)
         return {
             "release_id": result.release_id,
             "entry": result.entry,
@@ -959,6 +975,7 @@ def create_app(config: AppConfig) -> FastAPI:
         finally:
             shutil.rmtree(stage_dir, ignore_errors=True)
         audit.record(user.email, "files.upload_tree", bot, f"files={result['files']}")
+        await refresh_usage(bot)
         return {"files": result["files"], "bytes": result["bytes"]}
 
     @app.get("/api/bots/{bot_id}/releases")
@@ -1131,6 +1148,7 @@ def create_app(config: AppConfig) -> FastAPI:
             store.add_package(bot, spec)
             audit.record(user.email, "package.install", bot, spec)
             outputs.append(output)
+        await refresh_usage(bot)
         return {"specs": specs, "output": "\n".join(outputs)}
 
     @app.delete("/api/bots/{bot_id}/packages")
@@ -1156,6 +1174,7 @@ def create_app(config: AppConfig) -> FastAPI:
             )
         store.remove_package(bot, spec)
         audit.record(user.email, "package.remove", bot, spec)
+        await refresh_usage(bot)
         return {"spec": spec, "output": output}
 
     # -- launch command --------------------------------------------------------------
@@ -1300,8 +1319,6 @@ def create_app(config: AppConfig) -> FastAPI:
         return {"autostart": enabled}
 
     # -- live status (polled every second by the bot page) ---------------------------
-    disk_cache: dict[str, tuple[float, int]] = {}
-
     @app.get("/api/bots/{bot_id}/status")
     async def bot_status(
         stored: StoredBot = Depends(bot_access),
@@ -1314,19 +1331,15 @@ def create_app(config: AppConfig) -> FastAPI:
             uptime_seconds = procident.started_seconds_ago(stored.identity)
             if uptime_seconds is not None:
                 uptime_text = _format_duration(uptime_seconds)
-        now = time.time()
-        cached = disk_cache.get(bot)
-        if cached is not None and now - cached[0] < 5.0:
-            disk_bytes = cached[1]
-        else:
-            try:
-                disk_bytes = await run_in_threadpool(client.disk_usage, bot)
-            except Exception:  # noqa: BLE001
-                # A failed measurement falls back to the cached value;
-                # the status endpoint must never fail over disk usage.
-                disk_bytes = usage.get(bot, 0)
-            disk_cache[bot] = (now, disk_bytes)
-            usage[bot] = disk_bytes
+        # Disk usage is measured on actions (and hourly by the
+        # watchdog), not per poll: this endpoint is hit every second
+        # while the page is open, and a tree walk per poll is exactly
+        # the churn the action-based refresh exists to avoid. Only a
+        # bot with no measurement yet is measured here, once.
+        disk_bytes = usage.get(bot)
+        if disk_bytes is None:
+            await refresh_usage(bot)
+            disk_bytes = usage.get(bot, 0)
         active = store.active_release(bot)
         return {
             "state": state.value,
@@ -1456,6 +1469,7 @@ def create_app(config: AppConfig) -> FastAPI:
         except HelperError as exc:
             raise _file_error(exc) from None
         audit.record(user.email, "file.write", stored.bot_id, f"{zone}:{path}")
+        await refresh_usage(stored.bot_id)
         return {"status": "ok"}
 
     @app.post("/api/bots/{bot_id}/files/mkdir")
@@ -1493,6 +1507,7 @@ def create_app(config: AppConfig) -> FastAPI:
         except HelperError as exc:
             raise _file_error(exc) from None
         audit.record(user.email, "file.delete", stored.bot_id, f"{zone}:{path}")
+        await refresh_usage(stored.bot_id)
         return {"status": "ok"}
 
     @app.post("/api/bots/{bot_id}/files/rename")
@@ -1517,6 +1532,7 @@ def create_app(config: AppConfig) -> FastAPI:
             stored.bot_id,
             f"{body.get('path', '')} -> {body.get('to', '')}",
         )
+        await refresh_usage(stored.bot_id)
         return {"status": "ok"}
 
     # -- git webhook (signed, per-bot secret; PLAN 2.5) --------------------------------

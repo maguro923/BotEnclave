@@ -162,7 +162,7 @@
     <button class="secondary" id="file-newfile">{{ t('bot.new_file') }}</button>
   </p>
   <table>
-    <thead><tr><th>{{ t('bot.name_col') }}</th><th>{{ t('bot.kind') }}</th><th>{{ t('bot.size') }}</th><th></th></tr></thead>
+    <thead><tr><th>{{ t('bot.name_col') }}</th><th>{{ t('bot.kind') }}</th><th>{{ t('bot.size') }}</th><th>{{ t('bot.modified') }}</th><th></th></tr></thead>
     <tbody id="file-rows"></tbody>
   </table>
   <div id="file-editor" hidden>
@@ -563,6 +563,7 @@ async function loadFiles() {
     }
     const kindCell = document.createElement('td'); kindCell.textContent = entry.kind;
     const sizeCell = document.createElement('td'); sizeCell.textContent = entry.size == null ? '' : entry.size;
+    const modCell = document.createElement('td'); modCell.textContent = entry.mtime ? new Date(entry.mtime * 1000).toLocaleString() : '';
     const actCell = document.createElement('td');
     if (entry.kind === 'file') {
       const open = document.createElement('button');
@@ -586,7 +587,7 @@ async function loadFiles() {
       actCell.appendChild(document.createTextNode(' '));
       actCell.appendChild(del);
     }
-    tr.appendChild(nameCell); tr.appendChild(kindCell); tr.appendChild(sizeCell); tr.appendChild(actCell);
+    tr.appendChild(nameCell); tr.appendChild(kindCell); tr.appendChild(sizeCell); tr.appendChild(modCell); tr.appendChild(actCell);
     tbody.appendChild(tr);
   }
 }

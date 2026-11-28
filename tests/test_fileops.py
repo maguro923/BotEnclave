@@ -159,3 +159,19 @@ def test_read_cap_applies_to_a_file_growing_past_fstat(
     with pytest.raises(FileOpError) as excinfo:
         fileops.read_file(bot_root, "data", "growing.log")
     assert excinfo.value.code == "too_large"
+
+
+def test_list_dir_reports_mtime(bot_root: Path) -> None:
+    import time
+
+    target = bot_root / "data" / "config.json"
+    known = 1_700_000_000
+    os.utime(target, (known, known))
+    entries = fileops.list_dir(bot_root, "data", "")
+    entry = {e.name: e for e in entries}["config.json"]
+    assert entry.mtime == known
+    assert entry.to_json()["mtime"] == known
+    # Symlinks report their own timestamp and never break the listing.
+    link = {e.name: e for e in entries}["escape_file"]
+    assert link.kind == "symlink"
+    assert link.mtime is not None and link.mtime <= int(time.time())

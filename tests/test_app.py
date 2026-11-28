@@ -38,6 +38,7 @@ class FakeHelper:
         self.running: dict[str, dict[str, Any]] = {}
         self.capture: dict[str, bool] = {}
         self.cleared: list[str] = []
+        self.usage_calls = 0
         self.sent: list[tuple[str, str, bool]] = []
         self.launches: dict[str, dict[str, Any]] = {}
         self.fail_ops: set[str] = set()
@@ -138,6 +139,14 @@ class FakeHelper:
             pass
         elif op == "console_clear_history":
             self.cleared.append(bot)
+        elif op == "disk_usage":
+            self.usage_calls += 1
+            base = self._bot_root(bot)
+            result = {
+                "bytes": sum(
+                    p.stat().st_size for p in base.rglob("*") if p.is_file()
+                )
+            }
         elif op == "ensure_shell":
             result = {"shell": True}
         elif op == "shell_run":
@@ -1687,3 +1696,26 @@ def test_console_run_file(env: tuple[TestClient, FakeHelper, Path]) -> None:
     assert resp.status_code == 400
     resp = admin.post("/api/bots/alpha/console/run-file", json={})
     assert resp.status_code == 400
+
+
+def test_status_measures_disk_once_until_an_action(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    client, fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    admin.get("/api/bots/alpha/status")
+    admin.get("/api/bots/alpha/status")
+    admin.get("/api/bots/alpha/status")
+    assert fake.usage_calls == 1
+    # A file write is an action: it refreshes the measurement, and
+    # the next status read serves the refreshed value without walking.
+    resp = admin.put(
+        "/api/bots/alpha/files/content",
+        json={"zone": "data", "path": "note.txt", "content": "hello"},
+    )
+    assert resp.status_code == 200
+    assert fake.usage_calls == 2
+    data = admin.get("/api/bots/alpha/status").json()
+    assert fake.usage_calls == 2
+    assert data["disk_bytes"] >= 5

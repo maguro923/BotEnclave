@@ -79,3 +79,28 @@ def test_step_survives_supervisor_tick_failure(tmp_path: Path) -> None:
         tmp_path,
     )
     assert watchdog.step() == ["supervisor tick failed"]
+
+
+def test_disk_usage_measured_rarely(tmp_path: Path) -> None:
+    from botmgr.watchdog import DEFAULT_DISK_EVERY_STEPS
+
+    # The periodic backstop is hourly at the 5s cadence; actions in
+    # the web app refresh the value in between.
+    assert DEFAULT_DISK_EVERY_STEPS >= 720
+    client = StubClient(fail_bots=set())
+    supervisor = Supervisor(FakeBackend())
+    supervisor.register("alpha", CONFIG)
+    seen: list[tuple[str, int]] = []
+    watchdog = Watchdog(
+        supervisor,
+        client,  # type: ignore[arg-type]
+        CaptureController(client),  # type: ignore[arg-type]
+        tmp_path,
+        usage_sink=lambda bot, n: seen.append((bot, n)),
+        disk_every_steps=3,
+    )
+    watchdog.step()
+    watchdog.step()
+    assert seen == []
+    watchdog.step()
+    assert seen == [("alpha", 0)]

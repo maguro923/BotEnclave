@@ -45,9 +45,15 @@ class FileEntry:
     name: str
     kind: str  # file | dir | symlink | other
     size: int | None
+    mtime: int | None = None
 
     def to_json(self) -> dict[str, object]:
-        return {"name": self.name, "kind": self.kind, "size": self.size}
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "size": self.size,
+            "mtime": self.mtime,
+        }
 
 
 def _zone_base(bot_root: Path, zone: str) -> Path:
@@ -115,10 +121,15 @@ def list_dir(bot_root: Path, zone: str, rel: str) -> list[FileEntry]:
             kind = "file"
         else:
             kind = "other"
-        size = None
-        if kind == "file":
-            size = child.stat().st_size
-        entries.append(FileEntry(name=child.name, kind=kind, size=size))
+        # lstat throughout: a symlink reports its own timestamp and a
+        # dangling one must not fail the whole listing.
+        st = child.lstat()
+        size = st.st_size if kind == "file" else None
+        entries.append(
+            FileEntry(
+                name=child.name, kind=kind, size=size, mtime=int(st.st_mtime)
+            )
+        )
     return entries
 
 

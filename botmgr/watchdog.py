@@ -24,7 +24,7 @@ from botmgr.state import BotState
 from botmgr.supervisor import Supervisor
 
 DEFAULT_RSS_LIMIT_BYTES = 512 * 1024 * 1024
-DEFAULT_DISK_EVERY_STEPS = 120  # at a 5s cadence: about every 10 minutes
+DEFAULT_DISK_EVERY_STEPS = 720  # at a 5s cadence: about hourly; actions refresh sooner
 
 
 def read_rss_bytes(pid: int) -> int | None:
