@@ -9,7 +9,11 @@
   that venv was invisible to a lookup keyed on the running
   interpreter. uv is now also located through the venv the botmgr
   package itself lives in, or run as a module of the current
-  interpreter when the uv package is importable.
+  interpreter when the uv package is importable. The managed
+  directory is created owned by the manager user, and uv runs
+  hermetically (data root as working directory, config discovery
+  disabled) so an unrelated uv.toml in the process's working
+  directory can neither change nor break the install.
 - Added: each bot can pin a Python version (bot creation form, bot
   settings, or `botmgr bot-add --python`). Deploys then build the
   bot's virtualenv with that interpreter instead of the manager's

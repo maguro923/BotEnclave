@@ -171,6 +171,11 @@ def install_python(version: str, root: Path) -> str:
         **os.environ,
         "HOME": str(root),
         "UV_CACHE_DIR": str(root / ".cache" / "uv"),
+        # Hermetic: uv otherwise discovers a uv.toml from the
+        # working directory upward, which both surprises and can
+        # fail outright when that tree is not readable by the
+        # manager user.
+        "UV_NO_CONFIG": "1",
     }
     with _install_lock:
         try:
@@ -183,6 +188,7 @@ def install_python(version: str, root: Path) -> str:
             text=True,
             timeout=_INSTALL_TIMEOUT_SECONDS,
             env=env,
+            cwd=str(root),
             preexec_fn=lambda: os.umask(0o022),
             check=False,
         )

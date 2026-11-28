@@ -118,6 +118,34 @@ def test_install_python_uses_uv_into_the_managed_dir(
     assert pythons.install_python("3.10", root) == path
 
 
+def test_install_python_runs_uv_hermetically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess as subprocess_mod
+
+    from botmgr import pythons
+
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess_mod.CompletedProcess[str]:
+        seen["argv"] = argv
+        seen.update(kwargs)
+        target = Path(argv[argv.index("--install-dir") + 1])
+        exe = target / "cpython-3.10.0" / "bin" / "python3.10"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        return subprocess_mod.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(pythons, "_uv_command", lambda: ["/fake/uv"])
+    monkeypatch.setattr(pythons.subprocess, "run", fake_run)
+    root = tmp_path / "root"
+    assert pythons.install_python("3.10", root).endswith("python3.10")
+    assert seen["cwd"] == str(root)
+    env = seen["env"]
+    assert isinstance(env, dict) and env.get("UV_NO_CONFIG") == "1"
+
+
 def test_install_python_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
