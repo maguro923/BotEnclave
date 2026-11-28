@@ -399,6 +399,13 @@ def test_worker_timeout_kills_tree_and_cleans_up(
     try:
         with pytest.raises(DeployError, match="timed out"):
             deploy.deploy_zip("alpha", zip_path, "slow.zip")
+        # The kill is a signal and the fake's wait() cannot reap the
+        # real sleeper, so its death can lag the killpg briefly on a
+        # loaded runner; poll for it with a deadline instead of
+        # asserting in the same instant.
+        deadline = time.monotonic() + 5.0
+        while sleeper.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
         assert sleeper.poll() is not None  # the whole tree was killed
         bot_dir = root / "bots" / "alpha"
         assert list((bot_dir / "releases").iterdir()) == []
