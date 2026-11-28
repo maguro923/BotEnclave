@@ -2,6 +2,7 @@
 mode, and console input. Require root (see conftest)."""
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -119,7 +120,9 @@ def test_capture_writes_console_log(helper: Helper) -> None:
         stop(helper, identity)
     lines = read_tail(log_path(helper), 5)
     assert lines
-    assert all(line.startswith("flood line") for line in lines)
+    # Saved lines carry the writer's timestamp prefix.
+    stamp = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] flood line")
+    assert all(stamp.match(line) for line in lines)
 
 
 def test_private_mode_pauses_and_resumes_capture(helper: Helper) -> None:

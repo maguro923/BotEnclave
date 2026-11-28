@@ -121,7 +121,10 @@ def start_and_wait(root: Path, bot: str, package_dir: Path) -> int:
         return 1
     # Attach log capture before output starts, mirroring the helper path.
     target = bot_dir / "logs" / "console.log"
-    _tmux(package_dir, bot, "pipe-pane", "-t", "main", f"cat >> {target}")
+    command = shlex.join(
+        ["/usr/bin/python3", str(package_dir / "logwriter.py"), str(target)]
+    )
+    _tmux(package_dir, bot, "pipe-pane", "-t", "main", command)
     while True:
         state = _pane_state(package_dir, bot)
         if state != "alive":

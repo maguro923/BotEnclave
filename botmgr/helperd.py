@@ -899,9 +899,15 @@ class SystemExecutor:
         currently = self.capture_state(bot)
         if enabled and not currently:
             target = self._capture_target(bot)
-            proc = self._tmux(
-                bot, "pipe-pane", "-t", "main", f"cat >> {target}"
+            # The writer stamps every saved line with its write time.
+            command = shlex.join(
+                [
+                    "/usr/bin/python3",
+                    str(self.package_dir / "logwriter.py"),
+                    str(target),
+                ]
             )
+            proc = self._tmux(bot, "pipe-pane", "-t", "main", command)
             if proc.returncode != 0:
                 raise RuntimeError(f"pipe-pane failed: {proc.stderr.strip()}")
         elif not enabled and currently:
