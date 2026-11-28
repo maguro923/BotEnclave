@@ -24,6 +24,7 @@ across backends; the fingerprint key lives in ``secrets/token-hash.key``
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -96,7 +97,12 @@ class SecretsService:
     def fingerprint(self, token: str) -> str:
         """The registry fingerprint for a DISCORD_TOKEN value."""
         if self._token_key is None:
-            self._token_key = load_or_create_token_key(self._dir)
+            try:
+                self._token_key = load_or_create_token_key(self._dir)
+            except OSError as exc:
+                raise SecretsError(
+                    f"cannot access the token fingerprint key: {exc}"
+                ) from exc
         return token_fingerprint(self._token_key, token)
 
     # -- metadata -----------------------------------------------------------
@@ -115,9 +121,29 @@ class SecretsService:
         return data if isinstance(data, dict) else None
 
     def _write_meta(self, bot: str, keys: list[str]) -> None:
-        path = self._meta_path(bot)
-        path.write_text(json.dumps({"keys": keys}), encoding="utf-8")
-        path.chmod(0o600)
+        self._atomic_write_text(
+            self._meta_path(bot), json.dumps({"keys": keys}), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
+        """Write via a same-directory temp file and os.replace.
+
+        Replacing (rather than truncating in place) means a stale file
+        owned by another user — e.g. one created by a root CLI run
+        against a live service root — cannot block the manager: the
+        directory is manager-owned, so the rename always lands and the
+        new file carries the manager's ownership and a 0600 mode."""
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".envstore-")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding=encoding) as fh:
+                fh.write(text)
+            tmp.chmod(0o600)
+            os.replace(tmp, path)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            raise SecretsError(f"cannot write {path.name}: {exc}") from exc
 
     def backend(self, bot: str) -> str:
         stored = self._store.get_bot(bot)
@@ -136,9 +162,11 @@ class SecretsService:
         if backend == "systemd-creds":
             self._write_credential(bot, text)
         else:
-            path = self._enc_path(bot)
-            path.write_text(encrypt_text(self._fernet_or_create(), text), encoding="ascii")
-            path.chmod(0o600)
+            self._atomic_write_text(
+                self._enc_path(bot),
+                encrypt_text(self._fernet_or_create(), text),
+                encoding="ascii",
+            )
         self._write_meta(bot, sorted(env))
         # Point the store at the new backend BEFORE erasing the old
         # artifact: until this commit, resolve() still uses the old
@@ -228,11 +256,11 @@ class SecretsService:
             )
             env.pop(key, None)
             if env:
-                path.write_text(
+                self._atomic_write_text(
+                    path,
                     encrypt_text(self._fernet_or_create(), format_env_text(env)),
                     encoding="ascii",
                 )
-                path.chmod(0o600)
             else:
                 path.unlink(missing_ok=True)
             remaining = sorted(env)

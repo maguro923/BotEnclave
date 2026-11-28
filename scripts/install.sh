@@ -76,6 +76,14 @@ chown "$MANAGER_USER" "$ROOT"
 # them at runtime, so the directory must be manager-owned.
 mkdir -p "$ROOT/pythons"
 chown "$MANAGER_USER" "$ROOT/pythons"
+# The manager writes the per-bot secret metadata and Fernet stores in
+# secrets/ itself; files a root CLI run created there first would
+# otherwise block the service with permission errors. Credentials
+# (.cred) stay helper-managed, but chowning them too is harmless: the
+# helper runs as root and the directory itself gates access.
+if [ -d "$ROOT/secrets" ]; then
+    chown -R "$MANAGER_USER" "$ROOT/secrets"
+fi
 
 # Existing data is never overwritten; say so when there is any.
 EXISTING=""

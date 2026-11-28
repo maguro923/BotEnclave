@@ -254,3 +254,22 @@ def test_remove_key_systemd_creds_goes_through_the_helper(
     assert client.removed == [("alpha", "DISCORD_TOKEN")]
     assert service.keys("alpha") == ["OTHER"]
     assert store.token_hash_owner(service.fingerprint("tok-123")) is None
+
+
+def test_set_env_replaces_foreign_owned_meta(
+    tmp_path: Path, store: StateStore
+) -> None:
+    # A root CLI run against a live service root can leave the meta
+    # file owned by someone the manager cannot write to (or simply
+    # read-only). The manager must still be able to save: it replaces
+    # the file inside its own directory instead of truncating it.
+    service = SecretsService(tmp_path, store)
+    service.set_env("alpha", ENV, "fernet")
+    meta = tmp_path / "secrets" / "alpha.meta.json"
+    meta.chmod(0o400)
+    enc = tmp_path / "secrets" / "alpha.env.enc"
+    enc.chmod(0o400)
+    service.set_env("alpha", {"NEW": "1"}, "fernet")
+    assert service.keys("alpha") == ["NEW"]
+    assert meta.stat().st_mode & 0o777 == 0o600
+    assert enc.stat().st_mode & 0o777 == 0o600
