@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fixed: installing a Python version on selection failed with
+  "uv is not available on this host" when the panel ran under the
+  systemd unit, which starts the system interpreter with the
+  manager venv's site-packages on PYTHONPATH — the uv bundled in
+  that venv was invisible to a lookup keyed on the running
+  interpreter. uv is now also located through the venv the botmgr
+  package itself lives in, or run as a module of the current
+  interpreter when the uv package is importable.
 - Added: each bot can pin a Python version (bot creation form, bot
   settings, or `botmgr bot-add --python`). Deploys then build the
   bot's virtualenv with that interpreter instead of the manager's

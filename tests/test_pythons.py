@@ -104,7 +104,7 @@ def test_install_python_uses_uv_into_the_managed_dir(
     from botmgr import pythons
 
     uv = _fake_uv(tmp_path)
-    monkeypatch.setattr(pythons, "_uv_binary", lambda: str(uv))
+    monkeypatch.setattr(pythons, "_uv_command", lambda: [str(uv)])
     root = tmp_path / "root"
     # 3.10 is supported and not installed on the test host, so the
     # install path is exercised end to end against the fake uv.
@@ -113,7 +113,7 @@ def test_install_python_uses_uv_into_the_managed_dir(
     assert Path(path).is_file()
     # Already installed: a second call resolves without uv.
     monkeypatch.setattr(
-        pythons, "_uv_binary", lambda: (_ for _ in ()).throw(AssertionError)
+        pythons, "_uv_command", lambda: (_ for _ in ()).throw(AssertionError)
     )
     assert pythons.install_python("3.10", root) == path
 
@@ -126,12 +126,53 @@ def test_install_python_failures(
     with pytest.raises(pythons.InstallError, match="unsupported"):
         pythons.install_python("3.99", tmp_path)
     with pytest.raises(pythons.InstallError, match="uv is not available"):
-        monkeypatch.setattr(pythons, "_uv_binary", lambda: None)
+        monkeypatch.setattr(pythons, "_uv_command", lambda: None)
         pythons.install_python("3.10", tmp_path)
     uv = _fake_uv(tmp_path, fail=True)
-    monkeypatch.setattr(pythons, "_uv_binary", lambda: str(uv))
+    monkeypatch.setattr(pythons, "_uv_command", lambda: [str(uv)])
     with pytest.raises(pythons.InstallError, match="network is down"):
         pythons.install_python("3.10", tmp_path)
+
+
+def test_uv_command_finds_the_venv_the_package_lives_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr import pythons
+
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("", encoding="utf-8")
+    uv = venv / "bin" / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    pkg = venv / "lib" / "python3.99" / "site-packages" / "botmgr"
+    pkg.mkdir(parents=True)
+    fake_file = pkg / "pythons.py"
+    fake_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(pythons, "__file__", str(fake_file))
+    # The systemd unit's shape: the system interpreter runs the
+    # manager, so there is no uv next to sys.executable.
+    monkeypatch.setattr(pythons.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+    assert pythons._uv_command() == [str(uv)]
+
+
+def test_uv_command_module_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.util
+
+    from botmgr import pythons
+
+    monkeypatch.setattr(pythons, "__file__", str(tmp_path / "pythons.py"))
+    monkeypatch.setattr(pythons.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name: object() if name == "uv" else None
+    )
+    assert pythons._uv_command() == ["/usr/bin/python3", "-m", "uv"]
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert pythons._uv_command() is None
 
 
 def test_manager_interpreter_wins_for_its_version(

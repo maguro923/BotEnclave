@@ -12,6 +12,7 @@ arbitrary path derived from the version string.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -119,11 +120,31 @@ def resolve_interpreter(version: str, managed: Path | None = None) -> str:
     raise ValueError(f"Python {version} is not installed on this host")
 
 
-def _uv_binary() -> str | None:
+def _uv_command() -> list[str] | None:
+    """How to invoke uv, as an argv prefix.
+
+    The manager is not always run by its own venv's interpreter:
+    the systemd unit starts the system python with the venv's
+    site-packages on PYTHONPATH, so the uv binary bundled in that
+    venv must also be found via the package's own location, and as
+    a last resort uv can run as a module of the current interpreter
+    whenever the uv package is importable.
+    """
     sibling = Path(sys.executable).with_name("uv")
     if sibling.is_file() and os.access(sibling, os.X_OK):
-        return str(sibling)
-    return shutil.which("uv")
+        return [str(sibling)]
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyvenv.cfg").is_file():
+            candidate = parent / "bin" / "uv"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return [str(candidate)]
+            break
+    found = shutil.which("uv")
+    if found:
+        return [found]
+    if importlib.util.find_spec("uv") is not None:
+        return [sys.executable, "-m", "uv"]
+    return None
 
 
 def install_python(version: str, root: Path) -> str:
@@ -142,7 +163,7 @@ def install_python(version: str, root: Path) -> str:
         return resolve_interpreter(version, target)
     except ValueError:
         pass
-    uv = _uv_binary()
+    uv = _uv_command()
     if uv is None:
         raise InstallError("uv is not available on this host")
     target.mkdir(parents=True, exist_ok=True)
@@ -157,7 +178,7 @@ def install_python(version: str, root: Path) -> str:
         except ValueError:
             pass
         proc = subprocess.run(
-            [uv, "python", "install", version, "--install-dir", str(target)],
+            [*uv, "python", "install", version, "--install-dir", str(target)],
             capture_output=True,
             text=True,
             timeout=_INSTALL_TIMEOUT_SECONDS,
