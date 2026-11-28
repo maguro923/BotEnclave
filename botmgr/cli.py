@@ -23,6 +23,7 @@ from botmgr.console import CaptureController
 from botmgr.helper import HelperClient, HelperError, direct_transport
 from botmgr.helper_backend import HelperBackend
 from botmgr.launcher import LaunchConfig
+from botmgr.pythons import InstallError, install_python, is_supported
 from botmgr.reconcile import ReconcileReport, reconcile
 from botmgr.store import StateStore
 from botmgr.supervisor import Supervisor
@@ -295,8 +296,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("bot-add")
     p.add_argument("bot")
     p.add_argument("--cwd", default=None)
+    p.add_argument("--python", dest="python_version", default=None)
     p.add_argument("--env", action="append", default=[])
-    p.add_argument("bot_command", nargs=argparse.REMAINDER)
+    # Not REMAINDER: that would swallow the options above whenever
+    # they follow the bot name. argparse's own "--" ends option
+    # parsing and the rest lands here.
+    p.add_argument("bot_command", nargs="*")
 
     for name in ("bot-start", "bot-stop", "bot-status"):
         p = sub.add_parser(name)
@@ -353,7 +358,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("archive", type=Path)
     p.add_argument("--force", action="store_true")
 
-    args = parser.parse_args(argv)
+    # bot-add's command is everything after "--". Split it off before
+    # argparse sees it: a REMAINDER positional would swallow bot-add's
+    # own options, and a "*" positional cannot claim arguments that
+    # follow "--" once an option has intervened.
+    raw = list(argv) if argv is not None else None
+    command_tail: list[str] = []
+    if raw is not None and "bot-add" in raw:
+        start = raw.index("bot-add")
+        if "--" in raw[start:]:
+            cut = raw.index("--", start)
+            command_tail = raw[cut + 1 :]
+            raw = raw[:cut]
+    args = parser.parse_args(raw)
     if args.command == "backup":
         from botmgr.backup import BackupError, create_backup
 
@@ -530,9 +547,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "user-delete":
             print(runtime.client.delete_user(args.bot))
         elif args.command == "bot-add":
-            command = list(args.bot_command)
-            if command and command[0] == "--":
-                command = command[1:]
+            command = command_tail or list(args.bot_command)
             if not command:
                 parser.error("bot-add needs a command after --")
             env: dict[str, str] = {}
@@ -542,9 +557,22 @@ def main(argv: list[str] | None = None) -> int:
                     parser.error(f"--env expects KEY=VALUE, got {pair!r}")
                 env[key] = value
             cwd = args.cwd or str(args.root / "bots" / args.bot / "data")
+            if args.python_version is not None:
+                if not is_supported(args.python_version):
+                    parser.error(
+                        f"unsupported Python version: {args.python_version!r}"
+                    )
+                try:
+                    install_python(args.python_version, args.root)
+                except InstallError as exc:
+                    parser.error(str(exc))
             supervisor.register(
                 args.bot, LaunchConfig(tuple(command), cwd, env)
             )
+            if args.python_version is not None:
+                runtime.store.set_python_version(
+                    args.bot, args.python_version
+                )
             print(f"registered {args.bot}")
         elif args.command == "bot-start":
             supervisor.start(args.bot)

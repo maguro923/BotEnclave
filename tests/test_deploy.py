@@ -546,3 +546,43 @@ def test_deploy_edit_scratch_refuses_when_a_release_appeared(
     # The refused commit keeps the session and its files.
     assert store.edit_session_base("alpha") == ""
     assert (edit_dir / "bot.py").exists()
+
+
+def test_build_release_uses_the_pinned_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import botmgr.deploy as deploy_mod
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], log: object, timeout: float) -> None:
+        calls.append(argv)
+
+    monkeypatch.setattr(deploy_mod, "_run_logged", fake_run)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "bot.py").write_text("print('hi')\n", encoding="utf-8")
+    job: dict[str, object] = {
+        "root": str(tmp_path),
+        "bot": "alpha",
+        "release_id": "r1",
+        "kind": "tree",
+        "tree_path": str(tree),
+        "extra_packages": [],
+        "python_path": "/opt/pythons/python3.13",
+    }
+    result = deploy_mod.build_release(job)
+    assert result["entry"] == "bot.py"
+    assert calls[0][0] == "/opt/pythons/python3.13"  # py_compile
+    assert calls[1][0] == "/opt/pythons/python3.13"  # venv creation
+    assert calls[1][1:] == ["-m", "venv", str(tmp_path / "bots" / "alpha" / "venvs" / "r1")]
+
+    calls.clear()
+    job2 = dict(job)
+    job2["release_id"] = "r2"
+    del job2["python_path"]
+    deploy_mod.build_release(job2)
+    import sys
+
+    assert calls[0][0] == sys.executable  # default: the manager's Python
+    assert calls[1][0] == sys.executable

@@ -28,6 +28,7 @@ from typing import TextIO
 
 from botmgr.helper import HelperClient
 from botmgr.launcher import LaunchConfig
+from botmgr.pythons import managed_dir, resolve_interpreter
 from botmgr.store import ReleaseRecord, StateStore
 from botmgr.supervisor import Supervisor
 
@@ -242,15 +243,17 @@ def build_release(job: dict[str, object]) -> dict[str, object]:
         _unwrap_single_dir(release_dir)
         entry = detect_entry(release_dir)
         log.write(f"entry: {entry}\n")
+        # The bot's pinned interpreter (resolved by the manager from
+        # the stored version) compiles the entry and builds the venv;
+        # without a pin both use the manager's own Python.
+        builder = str(job.get("python_path") or sys.executable)
         # Syntax check in its own process, per PLAN 2.6 step 2.
         _run_logged(
-            [sys.executable, "-m", "py_compile", str(release_dir / entry)],
+            [builder, "-m", "py_compile", str(release_dir / entry)],
             log,
             timeout=60,
         )
-        _run_logged(
-            [sys.executable, "-m", "venv", str(venv_dir)], log, timeout=300
-        )
+        _run_logged([builder, "-m", "venv", str(venv_dir)], log, timeout=300)
         venv_python = venv_dir / "bin" / "python"
         requirements = release_dir / "requirements.txt"
         if requirements.is_file():
@@ -410,6 +413,14 @@ class DeployService:
             "release_id": release_id,
             "extra_packages": self._store.list_packages(bot),
         }
+        stored = self._store.get_bot(bot)
+        if stored is not None and stored.python_version:
+            try:
+                job["python_path"] = resolve_interpreter(
+                    stored.python_version, managed_dir(self._root)
+                )
+            except ValueError as exc:
+                raise DeployError(str(exc)) from None
         with tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", dir=tmp_dir, suffix=".json", delete=False
         ) as fh:

@@ -118,3 +118,17 @@ def test_supervisor_persists_transitions(tmp_path: Path) -> None:
     assert stored[0].state is BotState.STOPPED
     assert stored[0].identity is None
     store.close()
+
+
+def test_python_version_round_trip_and_preserved(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "botmgr.db")
+    store.register_bot("alpha", CONFIG)
+    assert store.get_bot("alpha").python_version is None  # type: ignore[union-attr]
+    store.set_python_version("alpha", "3.13")
+    assert store.get_bot("alpha").python_version == "3.13"  # type: ignore[union-attr]
+    # Re-registration (reconcile / set_config) must not reset the pin.
+    store.register_bot("alpha", CONFIG)
+    assert store.get_bot("alpha").python_version == "3.13"  # type: ignore[union-attr]
+    store.set_python_version("alpha", None)
+    assert store.get_bot("alpha").python_version is None  # type: ignore[union-attr]
+    store.close()

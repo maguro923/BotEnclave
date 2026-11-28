@@ -1363,3 +1363,95 @@ def test_bot_page_wires_editor_edit_session_and_packages(
     assert "vendor/codemirror/codemirror.js" in detail.text
     assert "edit-session" in detail.text
     assert "pkg-form" in detail.text
+
+
+def test_python_version_endpoints_and_creation(
+    env: tuple[TestClient, FakeHelper, Path],
+) -> None:
+    from botmgr.pythons import default_version
+
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+
+    resp = admin.post(
+        "/api/bots",
+        json={
+            "name": "alpha",
+            "command": ["python3", "bot.py"],
+            "python_version": default_version(),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    store = StateStore(root / "botmgr.db")
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.python_version == default_version()
+
+    bad = admin.post(
+        "/api/bots",
+        json={
+            "name": "beta",
+            "command": ["python3", "bot.py"],
+            "python_version": "3.99",
+        },
+    )
+    assert bad.status_code == 400
+    assert store.get_bot("beta") is None
+
+    got = admin.get("/api/bots/alpha/python-version")
+    assert got.status_code == 200
+    body = got.json()
+    assert body["version"] == default_version()
+    assert body["default"] == default_version()
+    assert default_version() in body["installed"]
+    assert "3.99" not in body["installable"]
+
+    resp = admin.put("/api/bots/alpha/python-version", json={"version": None})
+    assert resp.status_code == 200 and resp.json() == {"version": None}
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.python_version is None
+    bad = admin.put("/api/bots/alpha/python-version", json={"version": "3.99"})
+    assert bad.status_code == 400
+    bad = admin.put("/api/bots/alpha/python-version", json={"version": 3.13})
+    assert bad.status_code == 400
+
+    listing = admin.get("/api/pythons")
+    assert listing.status_code == 200
+    assert listing.json()["default"] == default_version()
+
+
+def test_python_version_put_installs_a_missing_interpreter(
+    env: tuple[TestClient, FakeHelper, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import botmgr.app as app_mod
+    from botmgr.pythons import SUPPORTED_VERSIONS, InstallError, default_version
+
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    target = next(v for v in SUPPORTED_VERSIONS if v != default_version())
+
+    calls: list[str] = []
+
+    def fake_install(version: str, root_arg: Path) -> str:
+        calls.append(version)
+        return f"/fake/python{version}"
+
+    monkeypatch.setattr(app_mod, "install_python", fake_install)
+    resp = admin.put("/api/bots/alpha/python-version", json={"version": target})
+    assert resp.status_code == 200 and resp.json() == {"version": target}
+    assert calls == [target]
+    store = StateStore(root / "botmgr.db")
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.python_version == target
+
+    def failing_install(version: str, root_arg: Path) -> str:
+        raise InstallError("boom")
+
+    monkeypatch.setattr(app_mod, "install_python", failing_install)
+    resp = admin.put(
+        "/api/bots/alpha/python-version", json={"version": default_version()}
+    )
+    assert resp.status_code == 502
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.python_version == target  # unchanged

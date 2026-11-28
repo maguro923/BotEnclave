@@ -9,6 +9,7 @@
   <form id="create-form">
     <input type="text" id="bot-name" placeholder="{{ t('dash.bot_name') }}" required>
     <input type="text" id="bot-command" placeholder="{{ t('dash.bot_command') }}" required style="width: 45%;">
+    <select id="bot-python"></select>
     <button type="submit">{{ t('dash.create') }}</button>
     <span id="create-error" class="error"></span>
   </form>
@@ -33,13 +34,38 @@
 </table>
 </div>
 <script>
+fetch('/api/pythons').then(async (resp) => {
+  if (!resp.ok) return;
+  const data = await resp.json();
+  const sel = document.getElementById('bot-python');
+  const def = document.createElement('option');
+  def.value = '';
+  def.textContent = window.t('bot.python_version') + ' ' + data.default + ' (' + window.t('bot.python_default') + ')';
+  sel.appendChild(def);
+  for (const v of data.installed) {
+    if (v === data.default) continue;
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = window.t('bot.python_version') + ' ' + v;
+    sel.appendChild(opt);
+  }
+  for (const v of data.installable) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = window.t('bot.python_version') + ' ' + v + ' ' + window.t('bot.python_install_suffix');
+    sel.appendChild(opt);
+  }
+}).catch(() => {});
 document.getElementById('create-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const name = document.getElementById('bot-name').value.trim();
   const command = document.getElementById('bot-command').value.trim().split(/\s+/);
+  const python = document.getElementById('bot-python').value;
+  const payload = { name, command };
+  if (python) payload.python_version = python;
   const resp = await apiFetch('/api/bots', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, command }),
+    body: JSON.stringify(payload),
   });
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));

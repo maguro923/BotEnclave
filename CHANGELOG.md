@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added: each bot can pin a Python version (bot creation form, bot
+  settings, or `botmgr bot-add --python`). Deploys then build the
+  bot's virtualenv with that interpreter instead of the manager's
+  own Python. Supported versions that are not installed yet are
+  downloaded and installed with uv into a managed directory under
+  the data root when the version is chosen; the choice takes
+  effect on the next deploy.
 - Fixed (security): the panel's databases were world-readable on
   disk. auth.db — which holds live session tokens and password
   hashes — plus botmgr.db and audit.log were created mode 0644, so

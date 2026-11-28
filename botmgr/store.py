@@ -73,6 +73,7 @@ _BOT_COLUMN_MIGRATIONS = {
     "command_override": "TEXT",
     "restart_policy": "TEXT NOT NULL DEFAULT 'once'",
     "autostart": "INTEGER NOT NULL DEFAULT 0",
+    "python_version": "TEXT",
 }
 
 
@@ -90,6 +91,7 @@ class StoredBot:
     command_override: tuple[str, ...] | None = None
     restart_policy: str = "once"
     autostart: bool = False
+    python_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,7 +157,7 @@ class StateStore:
             row = self._conn.execute(
                 "SELECT owner_id, secret_backend, source_type, git_url_enc,"
                 " git_branch, dotenv_mode, command_override, restart_policy,"
-                " autostart"
+                " autostart, python_version"
                 " FROM bots WHERE bot_id = ?",
                 (bot_id,),
             ).fetchone()
@@ -164,14 +166,14 @@ class StateStore:
             preserved = (
                 row[1:]
                 if row
-                else ("systemd-creds", None, None, None, 0, None, "once", 0)
+                else ("systemd-creds", None, None, None, 0, None, "once", 0, None)
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO bots (bot_id, launch_json, created_at,"
                 " owner_id, secret_backend, source_type, git_url_enc,"
                 " git_branch, dotenv_mode, command_override, restart_policy,"
-                " autostart)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " autostart, python_version)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     bot_id,
                     config_to_json(config),
@@ -212,7 +214,7 @@ class StateStore:
                 "SELECT b.bot_id, b.launch_json, s.state, s.pid, s.start_time,"
                 " s.boot_id, b.owner_id, b.secret_backend, b.source_type,"
                 " b.git_branch, b.dotenv_mode, b.command_override,"
-                " b.restart_policy, b.autostart FROM bots b"
+                " b.restart_policy, b.autostart, b.python_version FROM bots b"
                 " LEFT JOIN bot_state s ON s.bot_id = b.bot_id ORDER BY b.bot_id"
             ).fetchall()
         result: list[StoredBot] = []
@@ -232,6 +234,7 @@ class StateStore:
                 command_override_json,
                 restart_policy,
                 autostart,
+                python_version,
             ) = row
             identity = None
             if pid is not None and start_time is not None and boot_id is not None:
@@ -256,6 +259,7 @@ class StateStore:
                     ),
                     restart_policy=restart_policy or "once",
                     autostart=bool(autostart),
+                    python_version=python_version,
                 )
             )
         return result
@@ -291,6 +295,14 @@ class StateStore:
             self._conn.execute(
                 "UPDATE bots SET autostart = ? WHERE bot_id = ?",
                 (1 if enabled else 0, bot_id),
+            )
+            self._conn.commit()
+
+    def set_python_version(self, bot_id: str, version: str | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET python_version = ? WHERE bot_id = ?",
+                (version, bot_id),
             )
             self._conn.commit()
 

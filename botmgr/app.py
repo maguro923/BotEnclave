@@ -72,6 +72,15 @@ from botmgr.i18n import STRINGS, normalize_language, translator_for
 from botmgr.launcher import LaunchConfig
 from botmgr.logtail import LogFollower, read_tail
 from botmgr.masking import mask_lines
+from botmgr.pythons import (
+    SUPPORTED_VERSIONS,
+    InstallError,
+    default_version,
+    detect_interpreters,
+    install_python,
+    is_supported,
+    managed_dir,
+)
 from botmgr.reconcile import reconcile
 from botmgr.secrets import decrypt_text, encrypt_text, load_or_create_fernet
 from botmgr.state import RESTART_POLICIES, BotState
@@ -583,8 +592,16 @@ def create_app(config: AppConfig) -> FastAPI:
         quota = guest_quota_error(user, adding_bot=True)
         if quota is not None:
             raise HTTPException(status_code=403, detail=quota)
+        python_version = body.get("python_version")
+        if python_version is not None and not is_supported(python_version):
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported Python version: {python_version!r}",
+            )
 
         def do_create() -> None:
+            if python_version is not None:
+                install_python(python_version, root)
             client.create_user(name)
             supervisor.register(
                 name,
@@ -595,8 +612,13 @@ def create_app(config: AppConfig) -> FastAPI:
                 ),
                 owner_id=user.id,
             )
+            if python_version is not None:
+                store.set_python_version(name, python_version)
 
-        await run_in_threadpool(do_create)
+        try:
+            await run_in_threadpool(do_create)
+        except InstallError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
         audit.record(user.email, "bot.create", name)
         return {"id": name, "state": "stopped"}
 
@@ -1070,6 +1092,57 @@ def create_app(config: AppConfig) -> FastAPI:
             supervisor.set_restart_policy(bot, str(policy))
         audit.record(user.email, "bot.restart_policy", bot, str(policy))
         return {"policy": policy}
+
+    def python_choices() -> dict[str, object]:
+        installed = [
+            i.version for i in detect_interpreters(managed_dir(root))
+        ]
+        return {
+            "default": default_version(),
+            "installed": installed,
+            "installable": [
+                v for v in SUPPORTED_VERSIONS if v not in installed
+            ],
+        }
+
+    @app.get("/api/pythons")
+    async def pythons_list(
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+    ) -> dict[str, object]:
+        return python_choices()
+
+    @app.get("/api/bots/{bot_id}/python-version")
+    async def python_version_get(
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        return {"version": stored.python_version, **python_choices()}
+
+    @app.put("/api/bots/{bot_id}/python-version")
+    async def python_version_put(
+        payload: dict[str, object],
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        bot = stored.bot_id
+        raw = payload.get("version")
+        version: str | None = None
+        if raw is not None:
+            if not is_supported(raw):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unsupported Python version: {raw!r}",
+                )
+            assert isinstance(raw, str)
+            version = raw
+            try:
+                await run_in_threadpool(install_python, version, root)
+            except InstallError as exc:
+                raise HTTPException(
+                    status_code=502, detail=str(exc)
+                ) from None
+        store.set_python_version(bot, version)
+        audit.record(user.email, "bot.python_version", bot, str(version or ""))
+        return {"version": version}
 
     @app.get("/api/bots/{bot_id}/autostart")
     async def autostart_get(

@@ -1,0 +1,150 @@
+"""Interpreter detection and version resolution (botmgr.pythons)."""
+
+from __future__ import annotations
+
+import os
+import stat
+from pathlib import Path
+
+import pytest
+
+from botmgr.pythons import (
+    default_version,
+    detect_interpreters,
+    resolve_interpreter,
+)
+
+
+def _fake_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, executable in (
+        ("python3.97", True),
+        ("python3.98", True),
+        ("python3.96", False),  # present but not executable: unusable
+        ("python3", True),  # unversioned: not a pinnable candidate
+        ("python2.7", True),
+        ("python3.x", True),
+    ):
+        path = bin_dir / name
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        if executable:
+            path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return bin_dir
+
+
+def test_detect_includes_manager_and_fake_interpreters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_bin(tmp_path, monkeypatch)
+    found = {i.version: i.path for i in detect_interpreters()}
+    assert found[default_version()]  # the manager's own interpreter
+    assert found["3.97"].endswith("python3.97")
+    assert found["3.98"].endswith("python3.98")
+    assert "3.96" not in found  # not executable
+    assert "2.7" not in found
+    versions = [i.version for i in detect_interpreters()]
+    assert versions == sorted(
+        versions, key=lambda v: int(v.split(".")[1]), reverse=True
+    )
+
+
+def test_resolve_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_bin(tmp_path, monkeypatch)
+    assert resolve_interpreter("3.97").endswith("python3.97")
+    assert resolve_interpreter(default_version())
+    with pytest.raises(ValueError, match="not installed"):
+        resolve_interpreter("3.99")
+    for bad in ("3", "4.0", "3.13.1", "../bin/sh", "3.13; rm -rf /", ""):
+        with pytest.raises(ValueError, match="invalid"):
+            resolve_interpreter(bad)
+
+
+def test_managed_dir_interpreters_are_detected(tmp_path: Path) -> None:
+    from botmgr.pythons import managed_dir
+
+    root = tmp_path / "root"
+    build = managed_dir(root) / "cpython-3.97.1-linux-x86_64-gnu" / "bin"
+    build.mkdir(parents=True)
+    exe = build / "python3.97"
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+
+    found = {i.version: i.path for i in detect_interpreters(managed_dir(root))}
+    assert found["3.97"] == str(exe)
+    assert resolve_interpreter("3.97", managed_dir(root)) == str(exe)
+    with pytest.raises(ValueError, match="not installed"):
+        resolve_interpreter("3.97")  # invisible without the managed dir
+
+
+def _fake_uv(tmp_path: Path, fail: bool = False) -> Path:
+    script = tmp_path / "uv"
+    if fail:
+        body = "#!/bin/sh\necho 'network is down' >&2\nexit 1\n"
+    else:
+        body = (
+            "#!/bin/sh\n"
+            'ver="$3"\n'
+            'dir="$5"\n'
+            'mkdir -p "$dir/cpython-$ver.0/bin"\n'
+            'printf \'#!/bin/sh\\n\' > "$dir/cpython-$ver.0/bin/python$ver"\n'
+            'chmod +x "$dir/cpython-$ver.0/bin/python$ver"\n'
+        )
+    script.write_text(body, encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
+def test_install_python_uses_uv_into_the_managed_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr import pythons
+
+    uv = _fake_uv(tmp_path)
+    monkeypatch.setattr(pythons, "_uv_binary", lambda: str(uv))
+    root = tmp_path / "root"
+    # 3.10 is supported and not installed on the test host, so the
+    # install path is exercised end to end against the fake uv.
+    path = pythons.install_python("3.10", root)
+    assert path.endswith("python3.10")
+    assert Path(path).is_file()
+    # Already installed: a second call resolves without uv.
+    monkeypatch.setattr(
+        pythons, "_uv_binary", lambda: (_ for _ in ()).throw(AssertionError)
+    )
+    assert pythons.install_python("3.10", root) == path
+
+
+def test_install_python_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botmgr import pythons
+
+    with pytest.raises(pythons.InstallError, match="unsupported"):
+        pythons.install_python("3.99", tmp_path)
+    with pytest.raises(pythons.InstallError, match="uv is not available"):
+        monkeypatch.setattr(pythons, "_uv_binary", lambda: None)
+        pythons.install_python("3.10", tmp_path)
+    uv = _fake_uv(tmp_path, fail=True)
+    monkeypatch.setattr(pythons, "_uv_binary", lambda: str(uv))
+    with pytest.raises(pythons.InstallError, match="network is down"):
+        pythons.install_python("3.10", tmp_path)
+
+
+def test_manager_interpreter_wins_for_its_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    own = bin_dir / f"python{default_version()}"
+    own.write_text("#!/bin/sh\n", encoding="utf-8")
+    own.chmod(own.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    found = {i.version: i.path for i in detect_interpreters()}
+    assert found[default_version()] == sys.executable
+    assert os.path.isabs(found[default_version()])

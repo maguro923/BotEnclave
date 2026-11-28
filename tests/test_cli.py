@@ -129,3 +129,46 @@ def test_harden_data_root_tightens_existing_files(tmp_path: Path) -> None:
         assert mode == 0o700, name
     # Missing entries are fine (a fresh root has none of them yet).
     harden_data_root(tmp_path / "does-not-exist")
+
+
+def test_bot_add_python_version(tmp_path: Path) -> None:
+    from botmgr.pythons import default_version
+    from botmgr.store import StateStore
+
+    assert (
+        main(
+            [
+                "--root",
+                str(tmp_path),
+                "bot-add",
+                "alpha",
+                "--python",
+                default_version(),
+                "--",
+                "python3",
+                "bot.py",
+            ]
+        )
+        == 0
+    )
+    store = StateStore(tmp_path / "botmgr.db")
+    stored = store.get_bot("alpha")
+    assert stored is not None and stored.python_version == default_version()
+    store.close()
+
+
+def test_bot_add_python_version_rejects_uninstalled(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--root",
+                str(tmp_path),
+                "bot-add",
+                "alpha",
+                "--python",
+                "3.99",
+                "--",
+                "python3",
+                "bot.py",
+            ]
+        )

@@ -88,6 +88,13 @@
     <label><input type="checkbox" id="autostart-toggle"> {{ t('bot.autostart') }}</label>
     <span id="autostart-result"></span>
   </p>
+  <p>
+    <label>{{ t('bot.python_version') }}
+      <select id="py-select"></select>
+    </label>
+    <span id="py-result"></span>
+  </p>
+  <p class="muted">{{ t('bot.python_note') }}</p>
 </div>
 </div>
 
@@ -318,7 +325,40 @@ async function loadBehavior() {
   if (rp.ok) $('rp-select').value = (await rp.json()).policy;
   const as = await fetch('/api/bots/' + botId + '/autostart');
   if (as.ok) $('autostart-toggle').checked = (await as.json()).autostart;
+  const pv = await fetch('/api/bots/' + botId + '/python-version');
+  if (pv.ok) {
+    const data = await pv.json();
+    const sel = $('py-select');
+    sel.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = window.t('bot.python_default') + ' (' + data.default + ')';
+    sel.appendChild(def);
+    for (const v of data.installed) {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      sel.appendChild(opt);
+    }
+    for (const v of data.installable) {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v + ' ' + window.t('bot.python_install_suffix');
+      sel.appendChild(opt);
+    }
+    sel.value = data.version || '';
+  }
 }
+$('py-select').onchange = async () => {
+  const value = $('py-select').value;
+  const resp = await apiFetch('/api/bots/' + botId + '/python-version', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version: value === '' ? null : value }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  showResult($('py-result'), resp.ok ? window.t('bot.behavior_saved') : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
+  if (!resp.ok) loadBehavior();
+};
 $('rp-select').onchange = async () => {
   const resp = await apiFetch('/api/bots/' + botId + '/restart-policy', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
