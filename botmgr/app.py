@@ -21,6 +21,7 @@ import logging
 import os
 import secrets as stdlib_secrets
 import shlex
+import shutil
 import signal
 import threading
 import time
@@ -35,6 +36,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     HTTPException,
     Request,
     UploadFile,
@@ -48,7 +50,7 @@ from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
-from botmgr import packages, procident
+from botmgr import fileops, packages, procident
 from botmgr.access import AccessConfig, AccessMiddleware
 from botmgr.audit import AuditLog, AuditMirror
 from botmgr.auth.deps import AuthBundle, build_auth, init_auth_db
@@ -98,6 +100,7 @@ CSRF_COOKIE = "botenclave_csrf"
 CSRF_HEADER = "x-csrf-token"
 AUTH_COOKIE = "botenclave_auth"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_FILES = 2000
 MAX_WEBHOOK_BYTES = 1024 * 1024
 
 BASE_DIR = Path(__file__).parent
@@ -869,6 +872,74 @@ def create_app(config: AppConfig) -> FastAPI:
             "entry": result.entry,
             "state": result.state,
         }
+
+    @app.post("/api/bots/{bot_id}/files/upload-tree")
+    async def upload_tree(
+        files: list[UploadFile] = File(...),
+        paths: str = Form(...),
+        user: User = Depends(current_user),  # type: ignore[arg-type]
+        stored: StoredBot = Depends(bot_access),
+    ) -> dict[str, object]:
+        """Upload individual files or a whole folder into data/.
+
+        Unlike the zip deploy (an immutable release), these files land
+        in the bot's working directory, where install scripts and
+        hand-placed code live. The browser supplies each file's
+        relative path (a folder pick provides webkitRelativePath
+        values); every path is validated with the file manager's rules
+        before anything is staged."""
+        quota = guest_quota_error(user)
+        if quota is not None:
+            raise HTTPException(status_code=403, detail=quota)
+        bot = stored.bot_id
+        try:
+            rel_paths = json.loads(paths)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail="paths must be a JSON list"
+            ) from None
+        if (
+            not isinstance(rel_paths, list)
+            or len(rel_paths) != len(files)
+            or not (1 <= len(files) <= MAX_UPLOAD_FILES)
+        ):
+            raise HTTPException(
+                status_code=400, detail="files and paths do not line up"
+            )
+        staged: list[tuple[list[str], UploadFile]] = []
+        for rel, upload in zip(rel_paths, files, strict=True):
+            if not isinstance(rel, str):
+                raise HTTPException(status_code=400, detail="paths must be strings")
+            try:
+                parts = fileops._split(rel)
+            except fileops.FileOpError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            if not parts:
+                raise HTTPException(status_code=400, detail="a file path is required")
+            staged.append((parts, upload))
+        tmp_dir = root / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        stage_dir = tmp_dir / f"tree-{stdlib_secrets.token_hex(6)}"
+        stage_dir.mkdir()
+        total = 0
+        try:
+            for parts, upload in staged:
+                data = bytearray()
+                while chunk := await upload.read(65536):
+                    data += chunk
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_BYTES:
+                        raise HTTPException(status_code=413, detail="upload too large")
+                dest = stage_dir.joinpath(*parts)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                await run_in_threadpool(dest.write_bytes, bytes(data))
+            result = await run_in_threadpool(client.install_tree, bot, str(stage_dir))
+        except HelperError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        finally:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        audit.record(user.email, "files.upload_tree", bot, f"files={result['files']}")
+        return {"files": result["files"], "bytes": result["bytes"]}
 
     @app.get("/api/bots/{bot_id}/releases")
     async def list_releases(

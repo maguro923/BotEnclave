@@ -52,6 +52,12 @@
     <input type="file" id="zip-file" accept=".zip">
     <button type="submit">{{ t('bot.deploy_zip') }}</button>
   </form>
+  <form id="tree-form" style="margin-top: .5rem;">
+    <input type="file" id="tree-files" multiple>
+    <input type="file" id="tree-folder" webkitdirectory>
+    <button type="submit">{{ t('bot.upload_tree') }}</button>
+    <span class="muted">{{ t('bot.upload_tree_note') }}</span>
+  </form>
   <p id="deploy-result" class="warn"></p>
   <table>
     <thead><tr><th>{{ t('bot.release') }}</th><th>{{ t('bot.source') }}</th><th>{{ t('bot.active_col') }}</th><th></th></tr></thead>
@@ -284,6 +290,33 @@ $('zip-form').addEventListener('submit', async (e) => {
   showResult($('deploy-result'), resp.ok ? window.t('bot.deployed').replace('{id}', data.release_id) : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
   loadReleases();
 });
+$('tree-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  // Files picked individually keep their names; a folder pick sends
+  // webkitRelativePath values whose first segment (the folder itself)
+  // is stripped, so the folder's contents land in data/ directly.
+  let picked = [...$('tree-files').files];
+  let stripTop = false;
+  if (!picked.length && $('tree-folder').files.length) {
+    picked = [...$('tree-folder').files];
+    stripTop = true;
+  }
+  if (!picked.length) return;
+  const form = new FormData();
+  const paths = [];
+  for (const file of picked) {
+    form.append('files', file);
+    let rel = file.webkitRelativePath || file.name;
+    if (stripTop) rel = rel.split('/').slice(1).join('/') || file.name;
+    paths.push(rel);
+  }
+  form.append('paths', JSON.stringify(paths));
+  showResult($('deploy-result'), window.t('bot.uploading'));
+  const resp = await apiFetch('/api/bots/' + botId + '/files/upload-tree', { method: 'POST', body: form });
+  const data = await resp.json().catch(() => ({}));
+  showResult($('deploy-result'), resp.ok ? window.t('bot.uploaded_tree').replace('{n}', data.files) : window.t('bot.failed').replace('{detail}', data.detail || resp.status));
+  if (resp.ok) refreshUsageSoon();
+});
 $('rollback-btn').onclick = async () => {
   const resp = await apiFetch('/api/bots/' + botId + '/rollback', { method: 'POST' });
   const data = await resp.json().catch(() => ({}));
@@ -410,6 +443,7 @@ async function pollStatus() {
   $('meta-disk').textContent = data.disk_text;
 }
 setInterval(pollStatus, 1000);
+function refreshUsageSoon() { pollStatus(); }
 
 // -- environment -------------------------------------------------------------
 async function loadEnv() {

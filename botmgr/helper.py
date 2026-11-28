@@ -181,6 +181,10 @@ class HelperClient:
         result = self._call({"op": "disk_usage", "bot": bot})
         return int(result["bytes"])
 
+    def install_tree(self, bot: str, source: str) -> dict[str, int]:
+        result = self._call({"op": "install_tree", "bot": bot, "source": source})
+        return {"files": int(result["files"]), "bytes": int(result["bytes"])}
+
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, Any]]:
         result = self._call(
             {"op": "file_list", "bot": bot, "zone": zone, "path": rel}

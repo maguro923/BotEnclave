@@ -7,6 +7,7 @@ root or tmux.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -137,6 +138,20 @@ class FakeHelper:
             pass
         elif op == "console_clear_history":
             self.cleared.append(bot)
+        elif op == "install_tree":
+            src = Path(str(request["source"]))
+            dest = self._bot_root(bot) / "data"
+            dest.mkdir(parents=True, exist_ok=True)
+            count = 0
+            total = 0
+            for path in sorted(src.rglob("*")):
+                if path.is_file():
+                    target = dest / path.relative_to(src)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(path.read_bytes())
+                    count += 1
+                    total += path.stat().st_size
+            result = {"files": count, "bytes": total}
         elif op.startswith("file_"):
             try:
                 result = self._file_op(op, request)
@@ -1604,3 +1619,37 @@ def test_env_key_deletion(
     assert admin.delete("/api/bots/alpha/env/OTHER").status_code == 404
     assert admin.delete("/api/bots/alpha/env/DISCORD_TOKEN").status_code == 200
     assert admin.get("/api/bots/alpha/env").json()["keys"] == []
+
+
+def test_upload_tree_into_data(env: tuple[TestClient, FakeHelper, Path]) -> None:
+    client, _fake, root = env
+    admin = setup_admin(client, root)
+    create_bot(admin, "alpha")
+    resp = admin.post(
+        "/api/bots/alpha/files/upload-tree",
+        files=[
+            ("files", ("install.sh", b"#!/bin/sh\necho hi\n")),
+            ("files", ("main.py", b"print('x')\n")),
+        ],
+        data={"paths": json.dumps(["install.sh", "pkg/main.py"])},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["files"] == 2
+    data_dir = root / "bots" / "alpha" / "data"
+    assert (data_dir / "install.sh").read_bytes() == b"#!/bin/sh\necho hi\n"
+    assert (data_dir / "pkg" / "main.py").read_bytes() == b"print('x')\n"
+    # Traversal in a supplied path is refused before anything lands.
+    resp = admin.post(
+        "/api/bots/alpha/files/upload-tree",
+        files=[("files", ("evil", b"x"))],
+        data={"paths": json.dumps(["../evil"])},
+    )
+    assert resp.status_code == 400
+    assert not (root / "bots" / "alpha" / "evil").exists()
+    # A count mismatch between files and paths is a client error.
+    resp = admin.post(
+        "/api/bots/alpha/files/upload-tree",
+        files=[("files", ("a.txt", b"x"))],
+        data={"paths": json.dumps(["a.txt", "b.txt"])},
+    )
+    assert resp.status_code == 400

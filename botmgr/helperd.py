@@ -129,6 +129,7 @@ class Executor(Protocol):
     def file_mkdir(self, bot: str, zone: str, rel: str) -> None: ...
     def file_delete(self, bot: str, zone: str, rel: str) -> None: ...
     def file_rename(self, bot: str, zone: str, src: str, dst: str) -> None: ...
+    def install_tree(self, bot: str, source: str) -> dict[str, object]: ...
 
 
 @dataclasses.dataclass
@@ -276,6 +277,13 @@ class Helper:
             _reject_unknown_keys(request, {"op", "bot"})
             bot = validate_bot_name(request.get("bot"))
             return {"bytes": self.executor.disk_usage(bot)}
+        if op == "install_tree":
+            _reject_unknown_keys(request, {"op", "bot", "source"})
+            bot = validate_bot_name(request.get("bot"))
+            source = request.get("source")
+            if not isinstance(source, str) or not source:
+                raise RequestError("bad_request", "source must be a path string")
+            return self.executor.install_tree(bot, source)
         if op in (
             "file_list",
             "file_read",
@@ -1043,6 +1051,45 @@ class SystemExecutor:
 
     def file_rename(self, bot: str, zone: str, src: str, dst: str) -> None:
         fileops.rename_path(self._bot_root(bot), zone, src, dst)
+
+    def install_tree(self, bot: str, source: str) -> dict[str, object]:
+        """Copy a manager-staged tree into the bot's data/ (the
+        file/folder upload). The staging area must live under the data
+        root's tmp/ — that is the only place the manager may stage an
+        upload — and symlinks are refused outright: an upload carries
+        plain files only, and a link could redirect the copy (or the
+        chown) outside data/. Copied files become the bot user's,
+        0644; directories 0755 (data/ itself stays 0700)."""
+        src = Path(source)
+        tmp_real = Path(os.path.realpath(self.root / "tmp"))
+        src_real = Path(os.path.realpath(src))
+        if src_real != tmp_real and tmp_real not in src_real.parents:
+            raise RuntimeError("upload staging area is outside the data root tmp/")
+        if not src.is_dir():
+            raise RuntimeError("upload staging area is missing")
+        data_dir = self.root / "bots" / bot / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        pw = pwd.getpwnam(username_for(bot))
+        files = 0
+        total = 0
+        for dirpath, dirnames, filenames in os.walk(src):
+            for name in (*dirnames, *filenames):
+                if (Path(dirpath) / name).is_symlink():
+                    raise RuntimeError(f"upload contains a symlink: {name}")
+            rel_dir = Path(dirpath).relative_to(src)
+            dest_dir = data_dir / rel_dir
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            os.chown(dest_dir, pw.pw_uid, pw.pw_gid)
+            dest_dir.chmod(0o700 if rel_dir == Path(".") else 0o755)
+            for name in filenames:
+                staged = Path(dirpath) / name
+                dest = dest_dir / name
+                shutil.copyfile(staged, dest)
+                os.chown(dest, pw.pw_uid, pw.pw_gid)
+                dest.chmod(0o644)
+                files += 1
+                total += staged.stat().st_size
+        return {"files": files, "bytes": total}
 
     def stop_bot(self, bot: str, identity: ProcessIdentity, grace: float) -> int:
         exit_code = self._pane_exit_code(bot)

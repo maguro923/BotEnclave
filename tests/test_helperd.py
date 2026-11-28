@@ -83,6 +83,10 @@ class FakeExecutor:
         self.calls.append(("disk_usage", (bot,)))
         return 12345
 
+    def install_tree(self, bot: str, source: str) -> dict[str, object]:
+        self.calls.append(("install_tree", (bot, source)))
+        return {"files": 2, "bytes": 42}
+
     def file_list(self, bot: str, zone: str, rel: str) -> list[dict[str, object]]:
         self.calls.append(("file_list", (bot, zone, rel)))
         return [{"name": "a.txt", "kind": "file", "size": 3}]
@@ -595,3 +599,14 @@ def test_wait_for_session_times_out() -> None:
         _wait_for_session(executor, "alpha", timeout=0.05, interval=0.01)  # type: ignore[arg-type]
         is False
     )
+
+
+def test_install_tree_dispatch(helper: tuple[Helper, FakeExecutor]) -> None:
+    h, ex = helper
+    resp = h.handle(
+        {"op": "install_tree", "bot": "alpha", "source": "/srv/x/tmp/tree-1"}
+    )
+    assert resp == {"ok": True, "result": {"files": 2, "bytes": 42}}
+    assert ex.calls == [("install_tree", ("alpha", "/srv/x/tmp/tree-1"))]
+    resp = h.handle({"op": "install_tree", "bot": "alpha"})
+    assert resp["ok"] is False
