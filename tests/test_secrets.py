@@ -38,3 +38,29 @@ def test_concurrent_creator_mid_write_is_waited_out(tmp_path: Path) -> None:
     key_path.write_bytes(winner_key)
     thread.join(timeout=10)
     assert decrypt_text(result["fernet"], encrypt_text(Fernet(winner_key), "x")) == "x"
+
+
+def test_token_fingerprint_is_keyed_and_iterated() -> None:
+    from botmgr.secrets import token_fingerprint
+
+    fp = token_fingerprint(b"k" * 32, "tok-123")
+    # Deterministic for the same key and token (the registry's job),
+    # but a different key — or a plain SHA-256 — gives a different value.
+    assert fp == token_fingerprint(b"k" * 32, "tok-123")
+    assert fp != token_fingerprint(b"x" * 32, "tok-123")
+    assert fp != token_fingerprint(b"k" * 32, "tok-124")
+    import hashlib
+
+    assert fp != hashlib.sha256(b"tok-123").hexdigest()
+    # Iteration actually happens: one round differs from the default.
+    assert fp != token_fingerprint(b"k" * 32, "tok-123", iterations=1)
+
+
+def test_load_or_create_token_key(tmp_path: Path) -> None:
+    from botmgr.secrets import load_or_create_token_key
+
+    key = load_or_create_token_key(tmp_path)
+    assert len(key) == 32
+    assert load_or_create_token_key(tmp_path) == key
+    mode = (tmp_path / "token-hash.key").stat().st_mode & 0o777
+    assert mode == 0o600
